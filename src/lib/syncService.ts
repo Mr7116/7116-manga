@@ -16,55 +16,68 @@ export function normalizeThaiUrl(inputUrl: string): string {
 // Scrape a single chapter's images
 export async function scrapeChapterImages(chapterUrl: string): Promise<string[]> {
   const safeUrl = normalizeThaiUrl(chapterUrl);
-  const response = await fetch(safeUrl, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Accept":
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
-    },
-    next: { revalidate: 0 },
-  });
+  try {
+    const response = await fetch(safeUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept":
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
+      },
+      signal: AbortSignal.timeout(3500),
+      next: { revalidate: 0 },
+    });
 
-  if (!response.ok) return [];
+    if (!response.ok) return [];
 
-  const buffer = await response.arrayBuffer();
-  const html = new TextDecoder("utf-8").decode(buffer);
+    const buffer = await response.arrayBuffer();
+    const html = new TextDecoder("utf-8").decode(buffer);
 
-  // Pattern A: ts_reader.run
-  const tsReaderMatch = html.match(/ts_reader\.run\(([\s\S]*?)\);/);
-  if (tsReaderMatch && tsReaderMatch[1]) {
-    try {
-      const data = JSON.parse(tsReaderMatch[1]);
-      if (data.sources && Array.isArray(data.sources)) {
-        for (const src of data.sources) {
-          if (Array.isArray(src.images) && src.images.length > 0) {
-            return src.images;
+    // Pattern A: ts_reader.run
+    const tsReaderMatch = html.match(/ts_reader\.run\(([\s\S]*?)\);/);
+    if (tsReaderMatch && tsReaderMatch[1]) {
+      try {
+        const data = JSON.parse(tsReaderMatch[1]);
+        if (data.sources && Array.isArray(data.sources)) {
+          for (const src of data.sources) {
+            if (Array.isArray(src.images) && src.images.length > 0) {
+              return src.images;
+            }
           }
         }
-      }
-    } catch {}
-  }
-
-  // Pattern B: DOM images
-  const $ = cheerio.load(html);
-  const images: string[] = [];
-  $("#readerarea img, .reading-content img").each((_, el) => {
-    const src = $(el).attr("data-src") || $(el).attr("src");
-    if (src && !src.includes(".gif") && !src.includes("logo") && !src.includes("readerarea.svg")) {
-      images.push(src);
+      } catch {}
     }
-  });
 
-  return images;
+    // Pattern B: DOM images
+    const $ = cheerio.load(html);
+    const images: string[] = [];
+    $("#readerarea img, .reading-content img").each((_, el) => {
+      const src = $(el).attr("data-src") || $(el).attr("src");
+      if (src && !src.includes(".gif") && !src.includes("logo") && !src.includes("readerarea.svg")) {
+        images.push(src);
+      }
+    });
+
+    return images;
+  } catch {
+    return [];
+  }
 }
 
 // Smart Incremental Sync Engine for a Single Manga URL
-export async function syncMangaFromUrl(seriesUrl: string, options?: { maxNewChapters?: number; targetSlug?: string }) {
+export async function syncMangaFromUrl(
+  seriesUrl: string,
+  options?: {
+    maxNewChapters?: number;
+    targetSlug?: string;
+    startTime?: number;
+    maxDurationMs?: number;
+  }
+) {
   const safeUrl = normalizeThaiUrl(seriesUrl);
 
-  // 1. Fetch series main page
+  // 1. Fetch series main page with 3.5s timeout
   const response = await fetch(safeUrl, {
     headers: {
       "User-Agent":
@@ -73,6 +86,7 @@ export async function syncMangaFromUrl(seriesUrl: string, options?: { maxNewChap
         "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
     },
+    signal: AbortSignal.timeout(3500),
     next: { revalidate: 0 },
   });
 
@@ -231,6 +245,9 @@ export async function syncMangaFromUrl(seriesUrl: string, options?: { maxNewChap
 
   // 4. Download only new/missing chapters
   for (const ch of chaptersToDownload) {
+    if (options?.startTime && Date.now() - options.startTime > (options.maxDurationMs || 5000)) {
+      break;
+    }
     try {
       const pages = await scrapeChapterImages(ch.url);
       if (pages.length > 0) {
@@ -310,10 +327,12 @@ export async function syncMangaFromUrl(seriesUrl: string, options?: { maxNewChap
   };
 }
 
-// Sync active watched mangas in the watchlist
+// Sync active watched mangas in the watchlist with strict Time Budget Guard (< 5.5s)
 export async function syncAllWatchedMangas(options?: { maxNewChapters?: number; limit?: number }) {
-  const maxChapters = typeof options?.maxNewChapters === "number" ? options.maxNewChapters : 3;
-  const limit = options?.limit !== undefined ? options.limit : 3;
+  const startTime = Date.now();
+  const TIME_BUDGET_MS = 5500; // Strictly ensure under 5.5 seconds to guarantee 200 OK on Vercel Hobby!
+  const maxChapters = typeof options?.maxNewChapters === "number" ? options.maxNewChapters : 2;
+  const limit = options?.limit !== undefined ? options.limit : 2; // Process 1-2 mangas per run
 
   const watchlist = await prisma.watchedManga.findMany({
     where: { status: "active" },
@@ -326,8 +345,15 @@ export async function syncAllWatchedMangas(options?: { maxNewChapters?: number; 
 
   const results: any[] = [];
   for (const item of watchlist) {
+    if (Date.now() - startTime > TIME_BUDGET_MS) {
+      break;
+    }
     try {
-      const res = await syncMangaFromUrl(item.url, { maxNewChapters: maxChapters });
+      const res = await syncMangaFromUrl(item.url, {
+        maxNewChapters: maxChapters,
+        startTime,
+        maxDurationMs: TIME_BUDGET_MS,
+      });
       results.push({ url: item.url, success: true, ...res });
     } catch (err: any) {
       await prisma.watchedManga.update({

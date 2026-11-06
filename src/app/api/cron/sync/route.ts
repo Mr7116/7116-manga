@@ -30,8 +30,8 @@ async function handleSync(request: Request) {
       } catch {}
     }
 
-    const maxNewChapters = maxNewChaptersParam ? parseInt(maxNewChaptersParam, 10) : 3;
-    let limit = 3; // Default 3 mangas per cron run for sub-3s response!
+    const maxNewChapters = maxNewChaptersParam ? parseInt(maxNewChaptersParam, 10) : 2;
+    let limit = 2; // Default 2 mangas per cron run for sub-3s response!
     if (limitParam === "all" || limitParam === "0") {
       limit = 0; // all
     } else if (limitParam) {
