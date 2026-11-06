@@ -292,18 +292,27 @@ export function QueueProvider({ children }: { children: React.ReactNode }) {
           const exRes = await fetch(`/api/manga/existing-chapters?slug=${encodeURIComponent(resolvedSlug)}`);
           if (exRes.ok) {
             const exData = await exRes.json();
-            if (exData.success && Array.isArray(exData.chapters)) {
-              existingNums = exData.chapters;
+            if (exData.success) {
+              existingNums = exData.existingNumbers || exData.chapters || [];
             }
           }
         } catch {}
 
         const existingSet = new Set<number>(existingNums);
 
-        let chaptersToDownload = [...seriesData.chapters].reverse(); // Oldest first
+        let rawChapters = [...seriesData.chapters].reverse(); // Oldest first
         if (depth === "recent") {
-          chaptersToDownload = chaptersToDownload.slice(-5);
+          rawChapters = rawChapters.slice(-5);
         }
+
+        const chaptersToDownload = rawChapters.map((ch: any, idx: number) => {
+          const match = ch.title?.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || ch.url?.match(/ตอนที่-(\d+(\.\d+)?)/i);
+          const num = match ? parseFloat(match[1]) : (typeof ch.chapterNumber === "number" ? ch.chapterNumber : idx + 1);
+          return {
+            ...ch,
+            chapterNumber: num,
+          };
+        });
 
         const missingChapters = chaptersToDownload.filter(
           (ch: any) => !existingSet.has(ch.chapterNumber)
@@ -362,11 +371,11 @@ export function QueueProvider({ children }: { children: React.ReactNode }) {
 
             if (chScrapeRes.ok) {
               const chScrapeData = await chScrapeRes.json();
-              if (chScrapeData.success && chScrapeData.data?.pages?.length > 0) {
-                const match = ch.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || ch.url.match(/ตอนที่-(\d+(\.\d+)?)/i);
-                const chNum = match ? parseFloat(match[1]) : (ch.chapterNumber || chIdx + 1);
+              const chapterImages: string[] =
+                chScrapeData.data?.images || chScrapeData.data?.pages || [];
 
-                await fetch("/api/manga/save", {
+              if (chapterImages.length > 0) {
+                const saveChapterRes = await fetch("/api/manga/save", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
@@ -376,15 +385,20 @@ export function QueueProvider({ children }: { children: React.ReactNode }) {
                     title: seriesData.title,
                     cover: seriesData.cover,
                     synopsis: seriesData.synopsis,
-                    images: chScrapeData.data.pages,
-                    chapterNumber: chNum,
+                    images: chapterImages,
+                    chapterNumber: ch.chapterNumber,
                     chapterTitle: ch.title,
                   }),
                 });
-                completedInThisItem++;
+
+                if (saveChapterRes.ok) {
+                  completedInThisItem++;
+                }
               }
             }
-          } catch {}
+          } catch (chErr) {
+            console.error(`Failed to download chapter ${ch.title}:`, chErr);
+          }
 
           // Small delay to prevent network congestions
           await new Promise((r) => setTimeout(r, 200));
