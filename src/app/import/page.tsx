@@ -20,6 +20,7 @@ import {
   Square,
   RefreshCw,
   Zap,
+  FastForward,
 } from "lucide-react";
 
 interface ScrapeResult {
@@ -46,7 +47,7 @@ interface BatchLog {
   title: string;
   chapterNumber: number;
   pagesCount: number;
-  status: "running" | "success" | "error";
+  status: "running" | "success" | "error" | "skipped";
   error?: string;
 }
 
@@ -57,6 +58,7 @@ export default function ImportPage() {
   const [savedSuccess, setSavedSuccess] = useState<SavedMangaResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ScrapeResult | null>(null);
+  const [existingChapters, setExistingChapters] = useState<number[]>([]);
   const [isReadingMode, setIsReadingMode] = useState(false);
 
   // Batch Auto-Scrape State
@@ -89,6 +91,21 @@ export default function ImportPage() {
       }
 
       setResult(data.data);
+
+      // Check existing chapters in DB
+      try {
+        const checkRes = await fetch(
+          `/api/manga/existing-chapters?url=${encodeURIComponent(url.trim())}&title=${encodeURIComponent(data.data?.title || "")}`
+        );
+        const checkData = await checkRes.json();
+        if (checkData.success && Array.isArray(checkData.existingNumbers)) {
+          setExistingChapters(checkData.existingNumbers);
+        } else {
+          setExistingChapters([]);
+        }
+      } catch {
+        setExistingChapters([]);
+      }
     } catch (err: any) {
       setError(err.message || "ไม่สามารถดึงข้อมูลได้ โปรดลองอีกครั้ง");
     } finally {
@@ -148,7 +165,8 @@ export default function ImportPage() {
     const total = sortedChapters.length;
     setBatchProgress({ current: 0, total, percent: 0, currentTitle: "กำลังเริ่มต้น..." });
 
-    // Step 1: Ensure main manga metadata is saved first
+    // Step 1: Ensure main manga metadata is saved first, and get existing chapters from DB
+    let existingChapterSet = new Set<number>();
     try {
       await fetch("/api/manga/save", {
         method: "POST",
@@ -162,6 +180,15 @@ export default function ImportPage() {
           chapters: result.chapters,
         }),
       });
+
+      const checkRes = await fetch(
+        `/api/manga/existing-chapters?url=${encodeURIComponent(url)}&title=${encodeURIComponent(result.title || "")}`
+      );
+      const checkData = await checkRes.json();
+      if (checkData.success && Array.isArray(checkData.existingNumbers)) {
+        existingChapterSet = new Set(checkData.existingNumbers);
+        setExistingChapters(checkData.existingNumbers);
+      }
     } catch {}
 
     // Step 2: Loop through each chapter one by one
@@ -173,6 +200,23 @@ export default function ImportPage() {
       const ch = sortedChapters[i];
       const match = ch.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || ch.url.match(/ตอนที่-(\d+(\.\d+)?)/i);
       const chNum = match ? parseFloat(match[1]) : i + 1;
+
+      // ⏩ ถ้าเคยมีอยู่ในระบบแล้ว ข้ามทันที (ไม่ต้องดึงหรือบันทึกซ้ำ)
+      if (existingChapterSet.has(chNum)) {
+        setBatchProgress({
+          current: i + 1,
+          total,
+          percent: Math.round(((i + 1) / total) * 100),
+          currentTitle: `ข้าม ${ch.title} (มีในระบบแล้ว)`,
+        });
+
+        setBatchLogs((prev) => [
+          { title: ch.title, chapterNumber: chNum, pagesCount: 0, status: "skipped" },
+          ...prev,
+        ]);
+
+        continue;
+      }
 
       setBatchProgress({
         current: i + 1,
@@ -511,6 +555,8 @@ export default function ImportPage() {
                           className={`flex items-center justify-between rounded px-3 py-1.5 text-xs border ${
                             log.status === "success"
                               ? "border-emerald-500/30 bg-emerald-950/20 text-emerald-300"
+                              : log.status === "skipped"
+                              ? "border-cyan-500/30 bg-cyan-950/20 text-cyan-300"
                               : log.status === "running"
                               ? "border-amber-500/40 bg-amber-950/20 text-amber-300 animate-pulse"
                               : "border-rose-500/30 bg-rose-950/20 text-rose-300"
@@ -518,6 +564,7 @@ export default function ImportPage() {
                         >
                           <div className="flex items-center gap-2 truncate">
                             {log.status === "success" && <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />}
+                            {log.status === "skipped" && <FastForward className="h-3.5 w-3.5 text-cyan-400 shrink-0" />}
                             {log.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-400 shrink-0" />}
                             {log.status === "error" && <AlertCircle className="h-3.5 w-3.5 text-rose-400 shrink-0" />}
                             <span className="truncate font-semibold">{log.title}</span>
@@ -525,6 +572,7 @@ export default function ImportPage() {
 
                           <div className="shrink-0 font-medium text-[11px] ml-2">
                             {log.status === "success" && `${log.pagesCount} หน้าภาพครบถ้วน`}
+                            {log.status === "skipped" && "ข้าม (มีในระบบแล้ว)"}
                             {log.status === "running" && "กำลังดึงรูปภาพ..."}
                             {log.status === "error" && (log.error || "เกิดข้อผิดพลาด")}
                           </div>
@@ -596,34 +644,66 @@ export default function ImportPage() {
                     <div className="flex items-center justify-between">
                       <h4 className="text-xs font-bold text-zinc-200">
                         รายชื่อตอนที่ตรวจพบ ({result.chapters.length} ตอน):
+                        {existingChapters.length > 0 && (
+                          <span className="text-[#46e39a] ml-2 font-normal">
+                            (มีในระบบแล้ว {existingChapters.length} ตอน)
+                          </span>
+                        )}
                       </h4>
                       <button
                         onClick={handleStartBatchScrape}
                         disabled={isBatchRunning}
                         className="text-xs text-[#46e39a] hover:underline font-bold"
                       >
-                        ⚡ วนดึงทั้งหมด {result.chapters.length} ตอน
+                        {existingChapters.length > 0
+                          ? `⚡ วนดึงเฉพาะตอนใหม่ (ข้าม ${existingChapters.length} ตอนเดิมอัตโนมัติ)`
+                          : `⚡ วนดึงทั้งหมด ${result.chapters.length} ตอน`}
                       </button>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-64 overflow-y-auto">
-                      {result.chapters.map((ch, idx) => (
-                        <div
-                          key={idx}
-                          className="flex items-center justify-between rounded border border-zinc-800 bg-[#16181d] px-3 py-2 text-xs"
-                        >
-                          <span className="truncate text-zinc-300 font-medium">{ch.title}</span>
-                          <button
-                            onClick={() => {
-                              setUrl(ch.url);
-                              window.scrollTo({ top: 0, behavior: "smooth" });
-                            }}
-                            className="text-xs text-[#46e39a] hover:underline ml-2 font-bold shrink-0"
+                      {result.chapters.map((ch, idx) => {
+                        const match = ch.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || ch.url.match(/ตอนที่-(\d+(\.\d+)?)/i);
+                        const chNum = match ? parseFloat(match[1]) : idx + 1;
+                        const isAlreadyDownloaded = existingChapters.includes(chNum);
+
+                        return (
+                          <div
+                            key={idx}
+                            className={`flex items-center justify-between rounded border px-3 py-2 text-xs ${
+                              isAlreadyDownloaded
+                                ? "border-emerald-500/30 bg-emerald-950/20"
+                                : "border-zinc-800 bg-[#16181d]"
+                            }`}
                           >
-                            ดึงตอนนี้
-                          </button>
-                        </div>
-                      ))}
+                            <div className="flex items-center gap-1.5 truncate">
+                              {isAlreadyDownloaded && (
+                                <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                              )}
+                              <span className={`truncate font-medium ${isAlreadyDownloaded ? "text-emerald-300" : "text-zinc-300"}`}>
+                                {ch.title}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2 shrink-0 ml-2">
+                              {isAlreadyDownloaded && (
+                                <span className="text-[10px] text-emerald-400 bg-emerald-950/50 px-1.5 py-0.5 rounded border border-emerald-500/40">
+                                  มีในระบบแล้ว
+                                </span>
+                              )}
+                              <button
+                                onClick={() => {
+                                  setUrl(ch.url);
+                                  window.scrollTo({ top: 0, behavior: "smooth" });
+                                }}
+                                className="text-xs text-[#46e39a] hover:underline font-bold"
+                              >
+                                {isAlreadyDownloaded ? "ดึงซ้ำ" : "ดึงตอนนี้"}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}

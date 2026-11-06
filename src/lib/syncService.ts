@@ -1,6 +1,6 @@
 import { prisma } from "./prisma";
 import * as cheerio from "cheerio";
-import { slugify } from "./mangaService";
+import { slugify, findMatchingMangaSlug } from "./mangaService";
 
 // Helper to safely normalize Thai URLs
 export function normalizeThaiUrl(inputUrl: string): string {
@@ -61,7 +61,7 @@ export async function scrapeChapterImages(chapterUrl: string): Promise<string[]>
 }
 
 // Smart Incremental Sync Engine for a Single Manga URL
-export async function syncMangaFromUrl(seriesUrl: string, options?: { maxNewChapters?: number }) {
+export async function syncMangaFromUrl(seriesUrl: string, options?: { maxNewChapters?: number; targetSlug?: string }) {
   const safeUrl = normalizeThaiUrl(seriesUrl);
 
   // 1. Fetch series main page
@@ -120,15 +120,28 @@ export async function syncMangaFromUrl(seriesUrl: string, options?: { maxNewChap
     "";
 
   // Derive Slug
-  let slug = "";
-  try {
-    const urlObj = new URL(safeUrl);
-    const pathParts = urlObj.pathname.split("/").filter(Boolean);
-    if (pathParts.length > 0) {
-      slug = slugify(decodeURIComponent(pathParts[0]).replace(/-ตอนที่-\d+.*$/i, ""));
+  let slug = options?.targetSlug || "";
+  if (!slug) {
+    try {
+      const urlObj = new URL(safeUrl);
+      const pathParts = urlObj.pathname.split("/").filter(Boolean);
+      if (pathParts.length > 0) {
+        slug = slugify(decodeURIComponent(pathParts[0]).replace(/[-_](?:ตอนที่|ตอน|chapter|ch|ep)[-_]?\d+.*$/i, ""));
+      }
+    } catch {}
+    if (!slug) slug = slugify(title);
+
+    // Cross-source Smart Matching: check if this URL maps to an existing WatchedManga or matches by title
+    const existingWatch = await prisma.watchedManga.findUnique({
+      where: { url: safeUrl },
+      select: { slug: true },
+    });
+    if (existingWatch?.slug) {
+      slug = existingWatch.slug;
+    } else {
+      slug = await findMatchingMangaSlug(slug, title);
     }
-  } catch {}
-  if (!slug) slug = slugify(title);
+  }
 
   // Extract all chapters available on web
   const webChapters: { number: number; title: string; url: string }[] = [];

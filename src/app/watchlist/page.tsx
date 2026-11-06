@@ -53,10 +53,12 @@ export default function WatchlistPage() {
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
 
-  // Auto-Scheduler States
+  // Auto-Scheduler States (Persistent)
   const [autoScheduleActive, setAutoScheduleActive] = useState(false);
   const [intervalMinutes, setIntervalMinutes] = useState(30);
   const [secondsRemaining, setSecondsRemaining] = useState(30 * 60);
+  const [nextSyncAt, setNextSyncAt] = useState<string | null>(null);
+  const [schedulerLoading, setSchedulerLoading] = useState(false);
 
   // Activity Logs
   const [logs, setLogs] = useState<LogEntry[]>([
@@ -95,8 +97,70 @@ export default function WatchlistPage() {
     }
   };
 
+  // Fetch scheduler status from server/DB
+  const fetchSchedulerConfig = async () => {
+    try {
+      // First try localStorage for instant UI responsiveness
+      const cached = typeof window !== "undefined" ? localStorage.getItem("manga_scheduler_config") : null;
+      if (cached) {
+        try {
+          const c = JSON.parse(cached);
+          setAutoScheduleActive(Boolean(c.enabled));
+          setIntervalMinutes(c.intervalMinutes || 30);
+          setNextSyncAt(c.nextSyncAt || null);
+          if (c.enabled && c.nextSyncAt) {
+            const diffSec = Math.max(0, Math.round((new Date(c.nextSyncAt).getTime() - Date.now()) / 1000));
+            setSecondsRemaining(diffSec);
+          }
+        } catch {}
+      }
+
+      // Then fetch authoritative state from DB
+      const res = await fetch("/api/scheduler");
+      const json = await res.json();
+      if (json.success && json.data) {
+        setAutoScheduleActive(json.data.enabled);
+        setIntervalMinutes(json.data.intervalMinutes);
+        setNextSyncAt(json.data.nextSyncAt);
+        localStorage.setItem("manga_scheduler_config", JSON.stringify(json.data));
+
+        if (json.data.enabled && json.data.nextSyncAt) {
+          const diffSec = Math.max(0, Math.round((new Date(json.data.nextSyncAt).getTime() - Date.now()) / 1000));
+          setSecondsRemaining(diffSec);
+        } else {
+          setSecondsRemaining(json.data.intervalMinutes * 60);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load scheduler config", err);
+    }
+  };
+
   useEffect(() => {
     fetchWatchlist();
+    fetchSchedulerConfig();
+
+    const handleSyncFinished = (e: any) => {
+      fetchWatchlist();
+      fetchSchedulerConfig();
+      if (e?.detail?.data) {
+        addLog(`📦 [Scheduler] ซิงค์ข้อมูลอัตโนมัติสำเร็จ: ตรวจสอบ ${e.detail.data.length} เรื่อง`, "success");
+      }
+    };
+
+    const handleSchedulerUpdated = () => {
+      fetchSchedulerConfig();
+    };
+
+    window.addEventListener("manga-sync-finished", handleSyncFinished);
+    window.addEventListener("manga-scheduler-updated", handleSchedulerUpdated);
+    window.addEventListener("storage", handleSchedulerUpdated);
+
+    return () => {
+      window.removeEventListener("manga-sync-finished", handleSyncFinished);
+      window.removeEventListener("manga-scheduler-updated", handleSchedulerUpdated);
+      window.removeEventListener("storage", handleSchedulerUpdated);
+    };
   }, []);
 
   // Auto-Scheduler Timer Effect
@@ -107,22 +171,104 @@ export default function WatchlistPage() {
     }
 
     const timer = setInterval(() => {
-      setSecondsRemaining((prev) => {
-        if (prev <= 1) {
+      if (nextSyncAt) {
+        const diffSec = Math.round((new Date(nextSyncAt).getTime() - Date.now()) / 1000);
+        if (diffSec <= 0) {
+          setSecondsRemaining(0);
           triggerAutoSync();
-          return intervalMinutes * 60;
+        } else {
+          setSecondsRemaining(diffSec);
         }
-        return prev - 1;
-      });
+      } else {
+        setSecondsRemaining((prev) => {
+          if (prev <= 1) {
+            triggerAutoSync();
+            return intervalMinutes * 60;
+          }
+          return prev - 1;
+        });
+      }
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [autoScheduleActive, intervalMinutes]);
+  }, [autoScheduleActive, intervalMinutes, nextSyncAt]);
 
   // Trigger sync all
   const triggerAutoSync = async () => {
     addLog(`⏰ [Scheduler] เริ่มต้นรอบการซิงค์อัตโนมัติตามกำหนดเวลา...`, "info");
     await handleSyncAll();
+    await fetchSchedulerConfig();
+  };
+
+  // Toggle scheduler on/off (persisted in DB)
+  const handleToggleScheduler = async () => {
+    setSchedulerLoading(true);
+    const targetState = !autoScheduleActive;
+
+    try {
+      const res = await fetch("/api/scheduler", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: targetState,
+          intervalMinutes,
+        }),
+      });
+
+      const json = await res.json();
+      if (json.success && json.data) {
+        setAutoScheduleActive(json.data.enabled);
+        setNextSyncAt(json.data.nextSyncAt);
+        localStorage.setItem("manga_scheduler_config", JSON.stringify(json.data));
+
+        if (json.data.enabled && json.data.nextSyncAt) {
+          const diffSec = Math.max(0, Math.round((new Date(json.data.nextSyncAt).getTime() - Date.now()) / 1000));
+          setSecondsRemaining(diffSec);
+          addLog(
+            `✅ เปิดใช้งานระบบตั้งเวลาซิงค์อัตโนมัติแล้ว (ทุก ${json.data.intervalMinutes} นาที) - สถานะนี้จะเปิดค้างไว้ตลอดไปจนกว่าจะกดปิดเอง`,
+            "success"
+          );
+        } else {
+          setSecondsRemaining(intervalMinutes * 60);
+          addLog(`⏸ ปิดระบบตั้งเวลาซิงค์อัตโนมัติแล้ว`, "warn");
+        }
+
+        window.dispatchEvent(new Event("manga-scheduler-updated"));
+      } else {
+        throw new Error(json.error || "เกิดข้อผิดพลาดในการบันทึก");
+      }
+    } catch (err: any) {
+      addLog(`❌ บันทึกสถานะตั้งเวลาไม่สำเร็จ: ${err.message}`, "error");
+    } finally {
+      setSchedulerLoading(false);
+    }
+  };
+
+  const handleChangeInterval = async (val: number) => {
+    setIntervalMinutes(val);
+    setSecondsRemaining(val * 60);
+
+    if (autoScheduleActive) {
+      try {
+        const res = await fetch("/api/scheduler", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: true,
+            intervalMinutes: val,
+          }),
+        });
+        const json = await res.json();
+        if (json.success && json.data) {
+          setNextSyncAt(json.data.nextSyncAt);
+          localStorage.setItem("manga_scheduler_config", JSON.stringify(json.data));
+          window.dispatchEvent(new Event("manga-scheduler-updated"));
+          addLog(`⚙️ ปรับความถี่การซิงค์อัตโนมัติเป็น: ทุก ${val} นาที`, "info");
+        }
+      } catch (err: any) {
+        console.error("Failed to update interval", err);
+      }
+    }
   };
 
   // Add new manga URL to watchlist
@@ -426,23 +572,32 @@ export default function WatchlistPage() {
         {/* SCHEDULER CONTROLLER BAR */}
         <div className="bg-[#181a20] rounded-2xl border border-zinc-800 p-5 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center gap-4">
-            <div className={`p-3 rounded-xl ${autoScheduleActive ? "bg-emerald-500/20 text-emerald-400" : "bg-zinc-800 text-zinc-400"}`}>
-              <Clock className="w-5 h-5" />
+            <div
+              className={`p-3 rounded-xl transition-colors ${
+                autoScheduleActive ? "bg-emerald-500/20 text-emerald-400" : "bg-zinc-800 text-zinc-400"
+              }`}
+            >
+              <Clock
+                className={`w-5 h-5 ${autoScheduleActive ? "animate-spin" : ""}`}
+                style={{ animationDuration: "8s" }}
+              />
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-sm font-bold text-white">ระบบตั้งเวลาซิงค์อัตโนมัติ (Scheduler)</span>
                 <span
-                  className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold ${
-                    autoScheduleActive ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "bg-zinc-800 text-zinc-400"
+                  className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold transition-all ${
+                    autoScheduleActive
+                      ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                      : "bg-zinc-800 text-zinc-400"
                   }`}
                 >
-                  {autoScheduleActive ? "🟢 กำลังทำงาน (Active)" : "⚪ ปิดอยู่"}
+                  {autoScheduleActive ? "🟢 กำลังทำงาน (Active) - สถานะเปิดค้างถาวร" : "⚪ ปิดอยู่"}
                 </span>
               </div>
               <p className="text-xs text-zinc-400 mt-0.5">
                 {autoScheduleActive
-                  ? `รอบถัดไปในอีก: ${formatTimeRemaining(secondsRemaining)}`
+                  ? `รอบถัดไปในอีก: ${formatTimeRemaining(secondsRemaining)} (จะเปิดค้างไว้ตลอดไปจนกว่าคุณจะกดปิดเอง)`
                   : "กดเริ่มทำงานเพื่อให้ระบบซิงค์ตอนใหม่อัตโนมัติตามช่วงเวลา"}
               </p>
             </div>
@@ -454,12 +609,8 @@ export default function WatchlistPage() {
               <span className="text-zinc-500">ความถี่:</span>
               <select
                 value={intervalMinutes}
-                onChange={(e) => {
-                  const val = parseInt(e.target.value, 10);
-                  setIntervalMinutes(val);
-                  setSecondsRemaining(val * 60);
-                }}
-                disabled={autoScheduleActive}
+                onChange={(e) => handleChangeInterval(parseInt(e.target.value, 10))}
+                disabled={schedulerLoading}
                 className="bg-transparent text-emerald-400 font-bold focus:outline-none cursor-pointer"
               >
                 <option value={10} className="bg-zinc-900 text-white">ทุก 10 นาที</option>
@@ -474,17 +625,23 @@ export default function WatchlistPage() {
 
             {/* Toggle Scheduler Button */}
             <button
-              onClick={() => setAutoScheduleActive(!autoScheduleActive)}
+              onClick={handleToggleScheduler}
+              disabled={schedulerLoading}
               className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs shadow-md transition-all ${
                 autoScheduleActive
                   ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30"
                   : "bg-emerald-500 text-zinc-950 hover:bg-emerald-400"
-              }`}
+              } ${schedulerLoading ? "opacity-60 cursor-not-allowed" : ""}`}
             >
-              {autoScheduleActive ? (
+              {schedulerLoading ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>กำลังบันทึก...</span>
+                </>
+              ) : autoScheduleActive ? (
                 <>
                   <Pause className="w-3.5 h-3.5" />
-                  <span>หยุดตั้งเวลาชั่วคราว</span>
+                  <span>หยุดตั้งเวลา</span>
                 </>
               ) : (
                 <>

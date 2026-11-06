@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { syncAllWatchedMangas, syncMangaFromUrl } from "@/lib/syncService";
+import { recordSchedulerRun, getSchedulerConfig } from "@/lib/schedulerService";
 
 export const maxDuration = 60;
 
@@ -41,10 +42,13 @@ async function handleSync(request: Request) {
 
     // Full watchlist sync
     const results = await syncAllWatchedMangas();
+    const updatedScheduler = await recordSchedulerRun();
+
     return NextResponse.json({
       success: true,
       type: "all",
       totalMangaChecked: results.length,
+      scheduler: updatedScheduler,
       data: results,
     });
   } catch (error: any) {

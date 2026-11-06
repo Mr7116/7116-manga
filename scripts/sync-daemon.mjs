@@ -2,25 +2,47 @@
  * Manga Auto-Sync Daemon
  * ----------------------------------------------------
  * Runs in the background and periodically triggers /api/cron/sync
+ * Respects the persistent scheduler state in the database.
+ * 
  * Usage: node scripts/sync-daemon.mjs
  * Or: npm run sync:daemon
  */
 
 const BASE_URL = process.env.APP_URL || "http://localhost:3000";
-const INTERVAL_MINUTES = parseInt(process.env.SYNC_INTERVAL_MINUTES || "30", 10);
-const INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
 
 console.log("==================================================");
 console.log("  MANGA AUTO-SYNC BACKGROUND DAEMON");
 console.log(`  Target: ${BASE_URL}/api/cron/sync`);
-console.log(`  Interval: Every ${INTERVAL_MINUTES} minutes`);
+console.log("  Syncing with persistent database scheduler state...");
 console.log("==================================================");
 
-async function runSync() {
+let nextTimer = null;
+
+async function checkAndRun() {
   const timestamp = new Date().toLocaleString("th-TH");
-  console.log(`\n[${timestamp}] ⚡ Triggering scheduled manga sync...`);
 
   try {
+    // 1. Fetch current scheduler status from DB
+    const schedRes = await fetch(`${BASE_URL}/api/scheduler`);
+    if (!schedRes.ok) {
+      console.error(`[${timestamp}] ⚠️ Could not fetch scheduler config (status ${schedRes.status})`);
+      scheduleNext(30);
+      return;
+    }
+
+    const schedJson = await schedRes.json();
+    const config = schedJson.data || {};
+
+    if (!config.enabled) {
+      console.log(`[${timestamp}] ⏸️ Scheduler is currently OFF in system settings. Standing by (checking in 1 min)...`);
+      scheduleNext(1);
+      return;
+    }
+
+    const intervalMin = config.intervalMinutes || 30;
+    console.log(`\n[${timestamp}] ⚡ Scheduler is ACTIVE (Every ${intervalMin} mins). Triggering manga sync...`);
+
+    // 2. Trigger sync
     const res = await fetch(`${BASE_URL}/api/cron/sync`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -28,6 +50,7 @@ async function runSync() {
 
     if (!res.ok) {
       console.error(`[${timestamp}] ❌ Sync failed with status: ${res.status}`);
+      scheduleNext(intervalMin);
       return;
     }
 
@@ -43,16 +66,19 @@ async function runSync() {
           console.log(`   - [${item.title}]: Error: ${item.error}`);
         }
       }
-    } else {
-      console.log(`[${timestamp}] ⚠️ Response:`, data);
     }
+
+    scheduleNext(intervalMin);
   } catch (err) {
     console.error(`[${timestamp}] ❌ Connection error:`, err.message);
+    scheduleNext(1);
   }
 }
 
-// Run once immediately on start
-runSync();
+function scheduleNext(minutes) {
+  if (nextTimer) clearTimeout(nextTimer);
+  nextTimer = setTimeout(checkAndRun, minutes * 60 * 1000);
+}
 
-// Schedule recurring loop
-setInterval(runSync, INTERVAL_MS);
+// Start immediately
+checkAndRun();

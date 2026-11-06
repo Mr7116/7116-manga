@@ -63,6 +63,55 @@ function formatManga(m: any): CleanManga {
   };
 }
 
+// Helper to normalize manga title for cross-source matching (e.g. "The Infinite Mage" vs "Infinite Mage")
+export function normalizeMangaTitle(t: string): string {
+  if (!t) return "";
+  return t
+    .toLowerCase()
+    .replace(/\s*\|\s*.*$/, "")
+    .replace(/^อ่านมังงะ\s*(เรื่อง)?\s*/i, "")
+    .replace(/^มังงะ\s*(เรื่อง)?\s*/i, "")
+    .replace(/\s+แปลไทย.*$/i, "")
+    .replace(/^(the|a|an)\s+/i, "")
+    .replace(/\s*\((remake|color|thai)\)/gi, "")
+    .replace(/ตอนที่\s*\d+.*$/i, "")
+    .replace(/[^\w\u0E00-\u0E7F]/g, "")
+    .trim();
+}
+
+// Find existing manga by matching candidate slug or normalized titles
+export async function findMatchingMangaSlug(candidateSlug: string, title?: string): Promise<string> {
+  if (candidateSlug) {
+    const direct = await prisma.manga.findUnique({
+      where: { slug: candidateSlug },
+      select: { slug: true },
+    });
+    if (direct) return direct.slug;
+  }
+
+  if (!title) return candidateSlug;
+
+  const nTitle = normalizeMangaTitle(title);
+  if (!nTitle) return candidateSlug;
+
+  const all = await prisma.manga.findMany({
+    select: { slug: true, title: true, thaiTitle: true },
+  });
+
+  for (const m of all) {
+    const n1 = normalizeMangaTitle(m.title);
+    const n2 = normalizeMangaTitle(m.thaiTitle || "");
+    if (
+      (n1 && (nTitle === n1 || nTitle.includes(n1) || n1.includes(nTitle))) ||
+      (n2 && (nTitle.includes(n2) || n2.includes(nTitle)))
+    ) {
+      return m.slug;
+    }
+  }
+
+  return candidateSlug;
+}
+
 // Helper to create slug from title or URL
 export function slugify(text: string): string {
   return text
@@ -237,6 +286,9 @@ export async function saveScrapedManga(data: {
   if (!slug) {
     slug = slugify(data.title.replace(/ตอนที่\s*\d+.*/i, ""));
   }
+
+  // Cross-source Smart Matching: if candidate slug doesn't exist, check if an existing manga matches by title
+  slug = await findMatchingMangaSlug(slug, data.title);
 
   // Determine chapter number if URL is a chapter page
   let chapterNumber: number | null = null;
