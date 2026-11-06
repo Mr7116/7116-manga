@@ -27,7 +27,7 @@ async function handleSync(request: Request) {
       } catch {}
     }
 
-    const maxNewChapters = maxNewChaptersParam ? parseInt(maxNewChaptersParam, 10) : undefined;
+    const maxNewChapters = maxNewChaptersParam ? parseInt(maxNewChaptersParam, 10) : 5;
 
     // Single manga sync
     if (targetUrl) {

@@ -137,9 +137,19 @@ export default function WatchlistPage() {
       const res = await fetch("/api/watchlist", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: inputUrl.trim(), scanNow: true }),
+        body: JSON.stringify({ url: inputUrl.trim(), scanNow: true, maxNewChapters: 3 }),
       });
-      const data = await res.json();
+      
+      const text = await res.text();
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        if (res.status === 504 || text.includes("TIMEOUT") || text.includes("An error occurred")) {
+          throw new Error("เซิร์ฟเวอร์ใช้เวลาประมวลผลนานเกินกำหนด (Timeout) - มังงะมีจำนวนตอนมาก");
+        }
+        throw new Error("เซิร์ฟเวอร์ตอบกลับไม่ถูกต้อง");
+      }
 
       if (data.success) {
         addLog(
@@ -148,7 +158,7 @@ export default function WatchlistPage() {
         );
         if (data.syncResult) {
           addLog(
-            `📦 ผลการซิงค์: ข้ามตอนเดิม ${data.syncResult.skippedExistingChapters} ตอน | ดาวน์โหลดตอนใหม่ ${data.syncResult.newChaptersDownloaded} ตอน`,
+            `📦 ผลการซิงค์เริ่มต้น: ข้ามตอนเดิม ${data.syncResult.skippedExistingChapters} ตอน | ดาวน์โหลดตอนใหม่ ${data.syncResult.newChaptersDownloaded} ตอน`,
             "info"
           );
         }
@@ -175,7 +185,13 @@ export default function WatchlistPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: item.url }),
       });
-      const data = await res.json();
+      const text = await res.text();
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error("เซิร์ฟเวอร์ตอบกลับไม่ถูกต้องหรือหมดเวลาประมวลผล (Timeout)");
+      }
 
       if (data.success && data.data) {
         const r = data.data;
@@ -202,7 +218,13 @@ export default function WatchlistPage() {
 
     try {
       const res = await fetch("/api/cron/sync", { method: "POST" });
-      const data = await res.json();
+      const text = await res.text();
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error("เซิร์ฟเวอร์ตอบกลับไม่ถูกต้องหรือหมดเวลาประมวลผล (Timeout)");
+      }
 
       if (data.success && Array.isArray(data.data)) {
         let totalDownloaded = 0;

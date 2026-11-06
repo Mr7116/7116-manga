@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { normalizeThaiUrl, syncMangaFromUrl } from "@/lib/syncService";
 
+export const maxDuration = 60;
+
 // GET /api/watchlist - List all watched mangas
 export async function GET() {
   try {
@@ -59,7 +61,7 @@ export async function POST(request: Request) {
     // If scanNow is requested, perform incremental sync immediately
     if (scanNow) {
       const syncResult = await syncMangaFromUrl(safeUrl, {
-        maxNewChapters: typeof maxNewChapters === "number" ? maxNewChapters : undefined,
+        maxNewChapters: typeof maxNewChapters === "number" ? maxNewChapters : 3,
       });
 
       const watchedItem = await prisma.watchedManga.findUnique({
