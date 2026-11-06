@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Manga {
+  id            String    @id @default(cuid())
+  slug          String    @unique
+  title         String
+  thaiTitle     String?
+  nativeTitle   String?
+  cover         String
+  banner        String?
+  synopsis      String?   @db.Text
+  status        String    @default("Ongoing") // "Ongoing" | "Completed"
+  type          String    @default("MANHWA")  // "MANHWA" | "MANHUA" | "MANGA"
+  isColor       Boolean   @default(true)
+  genres        String    @default("Action,Fantasy") // Comma-separated or JSON string
+  rating        Float     @default(8.0)
+  ratingCount   Int       @default(100)
+  views         String    @default("1.0K")
+  author        String    @default("Unknown")
+  artist        String    @default("Unknown")
+  latestChapter Float     @default(1)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  chapters      Chapter[]
+}
+
+model Chapter {
+  id          String   @id @default(cuid())
+  number      Float
+  title       String
+  pages       String   @db.Text // JSON stringified array of image URLs
+  releaseDate String   @default("วันนี้")
+  createdAt   DateTime @default(now())
+
+  mangaId     String
+  manga       Manga    @relation(fields: [mangaId], references: [id], onDelete: Cascade)
+
+  @@unique([mangaId, number])
+}
+
+model WatchedManga {
+  id                 String    @id @default(cuid())
+  url                String    @unique
+  slug               String
+  title              String
+  cover              String?
+  status             String    @default("active") // "active" | "paused" | "error"
+  latestChapterOnWeb Float     @default(0)
+  latestChapterInDb  Float     @default(0)
+  lastSyncedAt       DateTime?
+  lastError          String?   @db.Text
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+}
