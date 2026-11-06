@@ -5,9 +5,17 @@ export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const rawBody = await req.json();
 
-    if (!body || !body.title) {
+    // Support both flat body and wrapped body ({ type, data, mangaSlug })
+    const payload =
+      rawBody && rawBody.data && typeof rawBody.data === "object"
+        ? { ...rawBody.data, ...rawBody }
+        : rawBody;
+
+    const title = payload?.title || payload?.seriesTitle || payload?.mangaTitle;
+
+    if (!payload || !title) {
       return NextResponse.json(
         { error: "ข้อมูลมังงะไม่ครบถ้วน (ต้องมี title)" },
         { status: 400 }
@@ -15,22 +23,23 @@ export async function POST(req: NextRequest) {
     }
 
     const result = await saveScrapedManga({
-      url: body.url || "",
-      seriesUrl: body.seriesUrl || undefined,
-      slug: body.slug || undefined,
-      title: body.title,
-      cover: body.cover,
-      synopsis: body.synopsis,
-      images: body.images || [],
-      chapters: body.chapters || [],
-      chapterNumber: typeof body.chapterNumber === "number" ? body.chapterNumber : undefined,
-      chapterTitle: body.chapterTitle || undefined,
+      url: payload.url || "",
+      seriesUrl: payload.seriesUrl || undefined,
+      slug: payload.slug || payload.mangaSlug || undefined,
+      title: title,
+      cover: payload.cover,
+      synopsis: payload.synopsis,
+      images: payload.images || payload.pages || [],
+      chapters: payload.chapters || [],
+      chapterNumber: typeof payload.chapterNumber === "number" ? payload.chapterNumber : undefined,
+      chapterTitle: payload.chapterTitle || undefined,
     });
 
     return NextResponse.json({
       success: true,
       message: "บันทึกมังงะและตอนลงฐานข้อมูลสำเร็จ!",
       data: result,
+      manga: result?.manga,
     });
   } catch (error: any) {
     console.error("Save manga error:", error);

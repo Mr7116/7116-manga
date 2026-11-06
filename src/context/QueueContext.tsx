@@ -236,8 +236,13 @@ export function QueueProvider({ children }: { children: React.ReactNode }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            type: "series",
-            data: seriesData,
+            url: item.url,
+            seriesUrl: item.url,
+            title: seriesData.title,
+            cover: seriesData.cover,
+            synopsis: seriesData.synopsis,
+            images: seriesData.images || [],
+            chapters: seriesData.chapters || [],
           }),
         });
 
@@ -358,13 +363,22 @@ export function QueueProvider({ children }: { children: React.ReactNode }) {
             if (chScrapeRes.ok) {
               const chScrapeData = await chScrapeRes.json();
               if (chScrapeData.success && chScrapeData.data?.pages?.length > 0) {
+                const match = ch.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || ch.url.match(/ตอนที่-(\d+(\.\d+)?)/i);
+                const chNum = match ? parseFloat(match[1]) : (ch.chapterNumber || chIdx + 1);
+
                 await fetch("/api/manga/save", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
-                    type: "chapter",
-                    data: chScrapeData.data,
-                    mangaSlug: resolvedSlug,
+                    url: ch.url,
+                    seriesUrl: item.url,
+                    slug: resolvedSlug,
+                    title: seriesData.title,
+                    cover: seriesData.cover,
+                    synopsis: seriesData.synopsis,
+                    images: chScrapeData.data.pages,
+                    chapterNumber: chNum,
+                    chapterTitle: ch.title,
                   }),
                 });
                 completedInThisItem++;
