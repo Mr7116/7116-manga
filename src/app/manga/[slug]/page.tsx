@@ -4,7 +4,7 @@ import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import ChapterListSection from "@/components/ChapterListSection";
 import MangaCard from "@/components/MangaCard";
-import { getMangaBySlug, getAllMangas } from "@/lib/mangaService";
+import { getMangaBySlug, getRelatedMangas } from "@/lib/mangaService";
 import {
   Star,
   Eye,
@@ -37,8 +37,7 @@ export default async function MangaDetailPage({ params }: PageProps) {
   }
 
   // Recommended mangas (exclude current)
-  const allMangas = await getAllMangas();
-  const relatedMangas = allMangas.filter((m) => m.slug !== manga.slug).slice(0, 5);
+  const relatedMangas = await getRelatedMangas(manga.slug, 5);
 
   const firstChapter = manga.chapters[manga.chapters.length - 1] || { number: 1 };
   const latestChapter = manga.chapters[0] || { number: 1 };

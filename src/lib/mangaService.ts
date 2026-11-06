@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { prisma } from "./prisma";
 import { seedDatabaseIfEmpty } from "./seed";
 
@@ -57,7 +58,7 @@ function formatManga(m: any): CleanManga {
       number: c.number,
       title: c.title,
       releaseDate: c.releaseDate,
-      pages: typeof c.pages === "string" ? JSON.parse(c.pages || "[]") : c.pages,
+      pages: c.pages ? (typeof c.pages === "string" ? JSON.parse(c.pages || "[]") : c.pages) : [],
     })),
   };
 }
@@ -120,13 +121,17 @@ export async function getAllMangas(filter?: {
   return formatted;
 }
 
-export async function getMangaBySlug(slug: string): Promise<CleanManga | null> {
-  await seedDatabaseIfEmpty();
-
+export const getMangaBySlug = cache(async (slug: string): Promise<CleanManga | null> => {
   const manga = await prisma.manga.findUnique({
     where: { slug },
     include: {
       chapters: {
+        select: {
+          id: true,
+          number: true,
+          title: true,
+          releaseDate: true,
+        },
         orderBy: { number: "desc" },
       },
     },
@@ -134,22 +139,68 @@ export async function getMangaBySlug(slug: string): Promise<CleanManga | null> {
 
   if (!manga) return null;
   return formatManga(manga);
-}
+});
 
-export async function getChapter(
+export const getChapter = cache(async (
   slug: string,
   chapterNumber: number
-): Promise<{ manga: CleanManga; chapter: CleanChapter } | null> {
-  await seedDatabaseIfEmpty();
-
+): Promise<{ manga: CleanManga; chapter: CleanChapter } | null> => {
+  // Query manga with chapter list (lightweight, without pages) for navigation
   const manga = await getMangaBySlug(slug);
   if (!manga) return null;
 
-  const chapter = manga.chapters.find((c) => c.number === chapterNumber);
-  if (!chapter) return null;
+  // Query ONLY the current chapter's pages
+  const currentChapterRecord = await prisma.chapter.findUnique({
+    where: {
+      mangaId_number: {
+        mangaId: manga.id,
+        number: chapterNumber,
+      },
+    },
+    select: {
+      id: true,
+      number: true,
+      title: true,
+      releaseDate: true,
+      pages: true,
+    },
+  });
 
-  return { manga, chapter };
-}
+  if (!currentChapterRecord) return null;
+
+  const currentChapter: CleanChapter = {
+    id: currentChapterRecord.id,
+    number: currentChapterRecord.number,
+    title: currentChapterRecord.title,
+    releaseDate: currentChapterRecord.releaseDate,
+    pages: typeof currentChapterRecord.pages === "string"
+      ? JSON.parse(currentChapterRecord.pages || "[]")
+      : (currentChapterRecord.pages || []),
+  };
+
+  return { manga, chapter: currentChapter };
+});
+
+export const getRelatedMangas = cache(async (excludeSlug: string, limit = 5): Promise<CleanManga[]> => {
+  const mangas = await prisma.manga.findMany({
+    where: { slug: { not: excludeSlug } },
+    take: limit,
+    orderBy: { updatedAt: "desc" },
+    include: {
+      chapters: {
+        select: {
+          id: true,
+          number: true,
+          title: true,
+          releaseDate: true,
+        },
+        orderBy: { number: "desc" },
+        take: 3,
+      },
+    },
+  });
+  return mangas.map(formatManga);
+});
 
 // SAVE SCRAPED MANGA & CHAPTER TO DATABASE
 export async function saveScrapedManga(data: {
