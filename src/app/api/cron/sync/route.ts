@@ -18,6 +18,7 @@ async function handleSync(request: Request) {
     const { searchParams } = new URL(request.url);
     let targetUrl = searchParams.get("url");
     let maxNewChaptersParam = searchParams.get("maxNewChapters");
+    let limitParam = searchParams.get("limit");
 
     // Also check JSON body if POST
     if (request.method === "POST") {
@@ -25,10 +26,18 @@ async function handleSync(request: Request) {
         const body = await request.json();
         if (body.url) targetUrl = body.url;
         if (body.maxNewChapters !== undefined) maxNewChaptersParam = String(body.maxNewChapters);
+        if (body.limit !== undefined) limitParam = String(body.limit);
       } catch {}
     }
 
-    const maxNewChapters = maxNewChaptersParam ? parseInt(maxNewChaptersParam, 10) : 5;
+    const maxNewChapters = maxNewChaptersParam ? parseInt(maxNewChaptersParam, 10) : 3;
+    let limit = 3; // Default 3 mangas per cron run for sub-3s response!
+    if (limitParam === "all" || limitParam === "0") {
+      limit = 0; // all
+    } else if (limitParam) {
+      const parsed = parseInt(limitParam, 10);
+      if (!isNaN(parsed)) limit = parsed;
+    }
 
     // Single manga sync
     if (targetUrl) {
@@ -40,14 +49,14 @@ async function handleSync(request: Request) {
       });
     }
 
-    // Full watchlist sync
-    const results = await syncAllWatchedMangas({ maxNewChapters });
+    // Incremental batch sync (oldest synced first)
+    const results = await syncAllWatchedMangas({ maxNewChapters, limit });
     const updatedScheduler = await recordSchedulerRun();
 
     return NextResponse.json({
       success: true,
       type: "all",
-      totalMangaChecked: results.length,
+      syncedInThisBatch: results.length,
       scheduler: updatedScheduler,
       data: results,
     });

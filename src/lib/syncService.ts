@@ -310,11 +310,18 @@ export async function syncMangaFromUrl(seriesUrl: string, options?: { maxNewChap
   };
 }
 
-// Sync all active watched mangas in the watchlist
-export async function syncAllWatchedMangas(options?: { maxNewChapters?: number }) {
+// Sync active watched mangas in the watchlist
+export async function syncAllWatchedMangas(options?: { maxNewChapters?: number; limit?: number }) {
   const maxChapters = typeof options?.maxNewChapters === "number" ? options.maxNewChapters : 3;
+  const limit = options?.limit !== undefined ? options.limit : 3;
+
   const watchlist = await prisma.watchedManga.findMany({
     where: { status: "active" },
+    orderBy: [
+      { lastSyncedAt: { sort: "asc", nulls: "first" } },
+      { updatedAt: "asc" },
+    ],
+    take: limit > 0 ? limit : undefined,
   });
 
   const results: any[] = [];
