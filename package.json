@@ -4,17 +4,18 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint",
     "postinstall": "prisma generate",
     "sync:daemon": "node scripts/sync-daemon.mjs"
   },
   "dependencies": {
-    "@prisma/client": "^6.4.1",
+    "@prisma/client": "6.4.1",
     "cheerio": "^1.2.0",
     "lucide-react": "^1.69.0",
     "next": "16.4.5",
+    "prisma": "6.4.1",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
@@ -27,7 +28,6 @@
     "eslint": "^9",
     "eslint-config-next": "16.4.5",
     "postcss": "^8.5.32",
-    "prisma": "^6.19.3",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
