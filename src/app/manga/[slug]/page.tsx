@@ -5,6 +5,7 @@ import Footer from "@/components/Footer";
 import ChapterListSection from "@/components/ChapterListSection";
 import MangaCard from "@/components/MangaCard";
 import { getMangaBySlug, getRelatedMangas } from "@/lib/mangaService";
+import { prisma } from "@/lib/prisma";
 import {
   Star,
   Eye,
@@ -13,6 +14,21 @@ import {
   Palette,
   Flame,
 } from "lucide-react";
+
+// Cache manga detail on Edge CDN for 60 seconds (ISR)
+export const revalidate = 60;
+
+export async function generateStaticParams() {
+  try {
+    const mangas = await prisma.manga.findMany({
+      select: { slug: true },
+      take: 20,
+    });
+    return mangas.map((m) => ({ slug: m.slug }));
+  } catch {
+    return [];
+  }
+}
 
 interface PageProps {
   params: Promise<{ slug: string }>;

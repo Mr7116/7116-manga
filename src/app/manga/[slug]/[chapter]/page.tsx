@@ -2,6 +2,10 @@ import { notFound } from "next/navigation";
 import { getChapter } from "@/lib/mangaService";
 import MangaReader from "@/components/MangaReader";
 
+// Cache chapter at Vercel Edge CDN for 1 hour (ISR)
+// All subsequent loads and RSC prefetches are served instantly from Edge cache in <50ms
+export const revalidate = 3600;
+
 interface ReaderPageProps {
   params: Promise<{
     slug: string;

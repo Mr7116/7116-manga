@@ -194,28 +194,25 @@ export const getChapter = cache(async (
   slug: string,
   chapterNumber: number
 ): Promise<{ manga: CleanManga; chapter: CleanChapter } | null> => {
-  // Query manga with chapter list (lightweight, without pages) for navigation
-  const manga = await getMangaBySlug(slug);
-  if (!manga) return null;
-
-  // Query ONLY the current chapter's pages
-  const currentChapterRecord = await prisma.chapter.findUnique({
-    where: {
-      mangaId_number: {
-        mangaId: manga.id,
+  // Query manga navigation and current chapter concurrently in parallel
+  const [manga, currentChapterRecord] = await Promise.all([
+    getMangaBySlug(slug),
+    prisma.chapter.findFirst({
+      where: {
+        manga: { slug },
         number: chapterNumber,
       },
-    },
-    select: {
-      id: true,
-      number: true,
-      title: true,
-      releaseDate: true,
-      pages: true,
-    },
-  });
+      select: {
+        id: true,
+        number: true,
+        title: true,
+        releaseDate: true,
+        pages: true,
+      },
+    }),
+  ]);
 
-  if (!currentChapterRecord) return null;
+  if (!manga || !currentChapterRecord) return null;
 
   const currentChapter: CleanChapter = {
     id: currentChapterRecord.id,
