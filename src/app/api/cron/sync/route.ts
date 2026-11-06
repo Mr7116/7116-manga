@@ -41,7 +41,7 @@ async function handleSync(request: Request) {
     }
 
     // Full watchlist sync
-    const results = await syncAllWatchedMangas();
+    const results = await syncAllWatchedMangas({ maxNewChapters });
     const updatedScheduler = await recordSchedulerRun();
 
     return NextResponse.json({

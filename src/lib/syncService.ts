@@ -311,7 +311,8 @@ export async function syncMangaFromUrl(seriesUrl: string, options?: { maxNewChap
 }
 
 // Sync all active watched mangas in the watchlist
-export async function syncAllWatchedMangas() {
+export async function syncAllWatchedMangas(options?: { maxNewChapters?: number }) {
+  const maxChapters = typeof options?.maxNewChapters === "number" ? options.maxNewChapters : 3;
   const watchlist = await prisma.watchedManga.findMany({
     where: { status: "active" },
   });
@@ -319,7 +320,7 @@ export async function syncAllWatchedMangas() {
   const results: any[] = [];
   for (const item of watchlist) {
     try {
-      const res = await syncMangaFromUrl(item.url);
+      const res = await syncMangaFromUrl(item.url, { maxNewChapters: maxChapters });
       results.push({ url: item.url, success: true, ...res });
     } catch (err: any) {
       await prisma.watchedManga.update({

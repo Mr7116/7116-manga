@@ -4,6 +4,7 @@ import { useState, useRef } from "react";
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
+import { useQueue, BatchQueueItem } from "@/context/QueueContext";
 import {
   Download,
   Sparkles,
@@ -56,20 +57,6 @@ interface BatchLog {
   error?: string;
 }
 
-interface BatchQueueItem {
-  id: string;
-  url: string;
-  slug?: string;
-  title?: string;
-  cover?: string;
-  totalChapters: number;
-  completedChapters: number;
-  skippedChapters: number;
-  status: "idle" | "scraping_meta" | "saving_manga" | "downloading_chapters" | "success" | "error" | "cancelled";
-  statusText: string;
-  error?: string;
-}
-
 export default function ImportPage() {
   const [url, setUrl] = useState("https://www.go-manga.com/third-rate-martial-family");
   const [loading, setLoading] = useState(false);
@@ -86,15 +73,21 @@ export default function ImportPage() {
   const [batchLogs, setBatchLogs] = useState<BatchLog[]>([]);
   const cancelBatchRef = useRef(false);
 
-  // Multi-URL Batch List State
+  // Global Multi-URL Queue Context (persists across page changes!)
+  const {
+    queueItems,
+    isQueueRunning,
+    queueProgress,
+    startQueue,
+    cancelQueue,
+    clearQueue,
+  } = useQueue();
+
+  // Multi-URL Batch List Local Controls
   const [importMode, setImportMode] = useState<"single" | "batch_list">("single");
   const [batchUrlsInput, setBatchUrlsInput] = useState<string>("");
   const [autoAddToWatchlist, setAutoAddToWatchlist] = useState<boolean>(true);
   const [batchScrapeDepth, setBatchScrapeDepth] = useState<"all" | "recent" | "meta_only">("all");
-  const [isQueueRunning, setIsQueueRunning] = useState<boolean>(false);
-  const [queueProgress, setQueueProgress] = useState({ current: 0, total: 0, percent: 0 });
-  const [queueItems, setQueueItems] = useState<BatchQueueItem[]>([]);
-  const cancelQueueRef = useRef<boolean>(false);
 
   const handleScrape = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -353,291 +346,10 @@ export default function ImportPage() {
     }
 
     setError(null);
-    setIsQueueRunning(true);
-    cancelQueueRef.current = false;
-
-    // Initialize queue items
-    const initialItems: BatchQueueItem[] = urls.map((u, i) => ({
-      id: `queue-${i}-${Date.now()}`,
-      url: u,
-      totalChapters: 0,
-      completedChapters: 0,
-      skippedChapters: 0,
-      status: "idle",
-      statusText: "รอดำเนินการในคิว",
-    }));
-
-    setQueueItems(initialItems);
-    setQueueProgress({ current: 0, total: urls.length, percent: 0 });
-
-    for (let i = 0; i < initialItems.length; i++) {
-      if (cancelQueueRef.current) {
-        setQueueItems((prev) =>
-          prev.map((item, idx) =>
-            idx >= i && item.status === "idle"
-              ? { ...item, status: "cancelled", statusText: "ยกเลิกคิวแล้ว" }
-              : item
-          )
-        );
-        break;
-      }
-
-      const item = initialItems[i];
-
-      setQueueItems((prev) =>
-        prev.map((it, idx) =>
-          idx === i
-            ? { ...it, status: "scraping_meta", statusText: "กำลังดึงข้อมูลเรื่องและรายชื่อตอน..." }
-            : it
-        )
-      );
-
-      setQueueProgress({
-        current: i + 1,
-        total: initialItems.length,
-        percent: Math.round((i / initialItems.length) * 100),
-      });
-
-      try {
-        // Step 1: Scrape Series Meta
-        const scrapeRes = await fetch("/api/scrape", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: item.url }),
-        });
-
-        const scrapeData = await scrapeRes.json();
-        if (!scrapeRes.ok || !scrapeData.success || !scrapeData.data) {
-          throw new Error(scrapeData.error || "ไม่สามารถเข้าถึง URL ได้");
-        }
-
-        const mangaData = scrapeData.data;
-        const totalCh = mangaData.chapters?.length || 0;
-
-        setQueueItems((prev) =>
-          prev.map((it, idx) =>
-            idx === i
-              ? {
-                  ...it,
-                  title: mangaData.title,
-                  cover: mangaData.cover,
-                  totalChapters: totalCh,
-                  status: "saving_manga",
-                  statusText: "กำลังบันทึกข้อมูลเรื่อง...",
-                }
-              : it
-          )
-        );
-
-        // Step 2: Save Manga into DB
-        const saveRes = await fetch("/api/manga/save", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            url: item.url,
-            seriesUrl: item.url,
-            title: mangaData.title,
-            cover: mangaData.cover,
-            synopsis: mangaData.synopsis,
-            chapters: mangaData.chapters || [],
-          }),
-        });
-        const saveJson = await saveRes.json();
-        const slug = saveJson.data?.manga?.slug || "";
-
-        // Step 3: Add to Watchlist (if enabled)
-        if (autoAddToWatchlist) {
-          try {
-            await fetch("/api/watchlist", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                url: item.url,
-                title: mangaData.title,
-                slug,
-                cover: mangaData.cover,
-                scanNow: false,
-                latestChapterOnWeb: totalCh,
-              }),
-            });
-          } catch (e) {
-            console.error("Failed to add to watchlist:", e);
-          }
-        }
-
-        // If meta_only, we're done with this manga!
-        if (batchScrapeDepth === "meta_only" || totalCh === 0) {
-          setQueueItems((prev) =>
-            prev.map((it, idx) =>
-              idx === i
-                ? {
-                    ...it,
-                    slug,
-                    status: "success",
-                    statusText: autoAddToWatchlist
-                      ? "✅ บันทึกเรื่องและเพิ่มเข้า Watchlist เรียบร้อย"
-                      : "✅ บันทึกเรื่องเรียบร้อย",
-                  }
-                : it
-            )
-          );
-          continue;
-        }
-
-        // Step 4: Download Chapters
-        let existingSet = new Set<number>();
-        try {
-          const checkRes = await fetch(
-            `/api/manga/existing-chapters?url=${encodeURIComponent(item.url)}&title=${encodeURIComponent(mangaData.title || "")}`
-          );
-          const checkData = await checkRes.json();
-          if (checkData.success && Array.isArray(checkData.existingNumbers)) {
-            existingSet = new Set(checkData.existingNumbers);
-          }
-        } catch {}
-
-        // Sort chapters oldest to newest
-        const sortedChapters = [...mangaData.chapters].sort((a: any, b: any) => {
-          const numA = parseFloat((a.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || a.url.match(/ตอนที่-(\d+(\.\d+)?)/i) || [, 0])[1] as string) || 0;
-          const numB = parseFloat((b.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || b.url.match(/ตอนที่-(\d+(\.\d+)?)/i) || [, 0])[1] as string) || 0;
-          return numA - numB;
-        });
-
-        // Filter chapters based on scrape depth
-        const targetChapters = batchScrapeDepth === "recent"
-          ? sortedChapters.slice(-5)
-          : sortedChapters;
-
-        let completed = 0;
-        let skipped = 0;
-
-        for (let chIdx = 0; chIdx < targetChapters.length; chIdx++) {
-          if (cancelQueueRef.current) break;
-
-          const ch = targetChapters[chIdx];
-          const match = ch.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || ch.url.match(/ตอนที่-(\d+(\.\d+)?)/i);
-          const chNum = match ? parseFloat(match[1]) : chIdx + 1;
-
-          if (existingSet.has(chNum)) {
-            skipped++;
-            setQueueItems((prev) =>
-              prev.map((it, idx) =>
-                idx === i
-                  ? {
-                      ...it,
-                      skippedChapters: skipped,
-                      statusText: `ข้ามตอนที่ ${chNum} (มีในระบบแล้ว)`,
-                    }
-                  : it
-              )
-            );
-            continue;
-          }
-
-          setQueueItems((prev) =>
-            prev.map((it, idx) =>
-              idx === i
-                ? {
-                    ...it,
-                    status: "downloading_chapters",
-                    currentChapterNumber: chNum,
-                    statusText: `กำลังดึง ${ch.title} (${chIdx + 1}/${targetChapters.length})...`,
-                  }
-                : it
-            )
-          );
-
-          try {
-            const chScrapeRes = await fetch("/api/scrape", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ url: ch.url }),
-            });
-            const chScrapeJson = await chScrapeRes.json();
-            const images = chScrapeJson.data?.images || [];
-
-            if (images.length > 0) {
-              await fetch("/api/manga/save", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  url: ch.url,
-                  seriesUrl: item.url,
-                  title: mangaData.title,
-                  cover: mangaData.cover,
-                  images,
-                  chapterNumber: chNum,
-                  chapterTitle: ch.title,
-                }),
-              });
-              completed++;
-              setQueueItems((prev) =>
-                prev.map((it, idx) =>
-                  idx === i
-                    ? {
-                        ...it,
-                        completedChapters: completed,
-                      }
-                    : it
-                )
-              );
-            }
-          } catch (e) {
-            console.error(`Error scraping chapter ${chNum}:`, e);
-          }
-
-          await new Promise((r) => setTimeout(r, 200));
-        }
-
-        // Update WatchedManga chapter count in DB
-        if (autoAddToWatchlist) {
-          try {
-            await fetch("/api/watchlist", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                url: item.url,
-                title: mangaData.title,
-                slug,
-                cover: mangaData.cover,
-                scanNow: false,
-                latestChapterOnWeb: totalCh,
-                latestChapterInDb: completed + skipped,
-              }),
-            });
-          } catch (e) {}
-        }
-
-        setQueueItems((prev) =>
-          prev.map((it, idx) =>
-            idx === i
-              ? {
-                  ...it,
-                  slug,
-                  status: "success",
-                  statusText: `✅ สำเร็จ! ดึงใหม่ ${completed} ตอน, ข้าม ${skipped} ตอน ${autoAddToWatchlist ? "• เข้า Watchlist แล้ว" : ""}`,
-                }
-              : it
-          )
-        );
-      } catch (err: any) {
-        setQueueItems((prev) =>
-          prev.map((it, idx) =>
-            idx === i
-              ? {
-                  ...it,
-                  status: "error",
-                  statusText: `❌ ล้มเหลว: ${err.message}`,
-                  error: err.message,
-                }
-              : it
-          )
-        );
-      }
-    }
-
-    setIsQueueRunning(false);
-    setQueueProgress((p) => ({ ...p, percent: 100 }));
+    await startQueue(urls, {
+      autoWatchlist: autoAddToWatchlist,
+      depth: batchScrapeDepth,
+    });
   };
 
   return (
@@ -787,7 +499,7 @@ export default function ImportPage() {
                 </div>
 
                 {/* Queue Control Buttons */}
-                <div className="pt-2 flex items-center gap-3">
+                <div className="pt-2 flex flex-wrap items-center gap-3">
                   {!isQueueRunning ? (
                     <button
                       type="button"
@@ -803,15 +515,28 @@ export default function ImportPage() {
                   ) : (
                     <button
                       type="button"
-                      onClick={() => {
-                        cancelQueueRef.current = true;
-                      }}
+                      onClick={cancelQueue}
                       className="flex items-center justify-center gap-2 rounded-xl bg-rose-500 hover:bg-rose-600 px-6 py-3 text-xs sm:text-sm font-bold text-white shadow-lg shadow-rose-500/20 transition-all cursor-pointer animate-pulse"
                     >
                       <Square className="h-4 w-4 fill-current" />
                       <span>หยุดทำงานชั่วคราว / ยกเลิกคิว</span>
                     </button>
                   )}
+
+                  {!isQueueRunning && queueItems.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={clearQueue}
+                      className="flex items-center gap-1.5 rounded-xl bg-[#202228] hover:bg-[#2b2d35] px-4 py-3 text-xs sm:text-sm font-bold text-zinc-300 border border-zinc-700/60 transition-colors"
+                    >
+                      <Trash2 className="h-4 w-4 text-zinc-400" />
+                      <span>ล้างรายการคิว</span>
+                    </button>
+                  )}
+
+                  <span className="text-[11px] text-zinc-400 bg-zinc-800/40 px-3 py-1.5 rounded-lg border border-zinc-700/40">
+                    💡 ระบบทำงานในพื้นหลัง: คุณสามารถเปลี่ยนไปหน้าอื่น หรือเปิดอ่านตอนอื่นได้ตลอดเวลา
+                  </span>
                 </div>
 
                 {/* Error Banner */}
