@@ -3,6 +3,7 @@ export interface Chapter {
   number: number;
   title: string;
   releaseDate: string;
+  createdAt?: string;
   pages: string[];
 }
 
@@ -25,6 +26,7 @@ export interface Manga {
   author: string;
   artist: string;
   updatedAt: string;
+  latestUpdateTimestamp?: number;
   latestChapter: number;
   chapters: Chapter[];
 }

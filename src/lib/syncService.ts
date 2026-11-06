@@ -262,6 +262,17 @@ export async function syncMangaFromUrl(seriesUrl: string, options?: { maxNewChap
     await new Promise((r) => setTimeout(r, 300));
   }
 
+  // If new chapters were downloaded, refresh manga updatedAt so it bumps to the top-left!
+  if (downloadedChapters.length > 0) {
+    await prisma.manga.update({
+      where: { id: mangaRecord.id },
+      data: {
+        updatedAt: new Date(),
+        latestChapter: Math.max(...downloadedChapters, mangaRecord.latestChapter),
+      },
+    });
+  }
+
   // Count current chapters in DB with downloaded images
   const totalDbChapters = completedChapterSet.size + downloadedChapters.length;
 

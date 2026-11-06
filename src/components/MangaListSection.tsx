@@ -32,7 +32,11 @@ export default function MangaListSection({ initialMangas }: MangaListSectionProp
     return true;
   });
 
-  if (selectedOrder === "Rating") {
+  if (selectedOrder === "Order by Update") {
+    filteredManga = [...filteredManga].sort(
+      (a, b) => (b.latestUpdateTimestamp || 0) - (a.latestUpdateTimestamp || 0)
+    );
+  } else if (selectedOrder === "Rating") {
     filteredManga = [...filteredManga].sort((a, b) => b.rating - a.rating);
   } else if (selectedOrder === "A-Z") {
     filteredManga = [...filteredManga].sort((a, b) => a.title.localeCompare(b.title));

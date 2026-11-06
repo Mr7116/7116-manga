@@ -21,6 +21,7 @@ export interface CleanManga {
   artist: string;
   latestChapter: number;
   updatedAt: string;
+  latestUpdateTimestamp: number;
   chapters: CleanChapter[];
 }
 
@@ -29,11 +30,28 @@ export interface CleanChapter {
   number: number;
   title: string;
   releaseDate: string;
+  createdAt?: string;
   pages: string[];
 }
 
 // Convert Prisma model to UI CleanManga
 function formatManga(m: any): CleanManga {
+  const chapters = (m.chapters || []).map((c: any) => ({
+    id: c.id,
+    number: c.number,
+    title: c.title,
+    releaseDate: c.releaseDate || "วันนี้",
+    createdAt: c.createdAt ? new Date(c.createdAt).toISOString() : undefined,
+    pages: c.pages ? (typeof c.pages === "string" ? JSON.parse(c.pages || "[]") : c.pages) : [],
+  }));
+
+  // True latest chapter update timestamp for sorting:
+  // Whichever manga has the newest chapter created/added sits at the top-left!
+  const chapterTimestamps = chapters.map((c: any) => (c.createdAt ? new Date(c.createdAt).getTime() : 0));
+  const maxChapterTime = chapterTimestamps.length > 0 ? Math.max(...chapterTimestamps) : 0;
+  const mangaTimestamp = m.updatedAt ? new Date(m.updatedAt).getTime() : 0;
+  const latestUpdateTimestamp = maxChapterTime > 0 ? maxChapterTime : mangaTimestamp;
+
   return {
     id: m.id,
     slug: m.slug,
@@ -51,15 +69,10 @@ function formatManga(m: any): CleanManga {
     views: m.views || "1.0K",
     author: m.author || "Unknown",
     artist: m.artist || "Unknown",
-    latestChapter: m.latestChapter || 1,
+    latestChapter: m.latestChapter || (chapters[0]?.number ?? 1),
     updatedAt: "อัปเดตล่าสุด",
-    chapters: (m.chapters || []).map((c: any) => ({
-      id: c.id,
-      number: c.number,
-      title: c.title,
-      releaseDate: c.releaseDate,
-      pages: c.pages ? (typeof c.pages === "string" ? JSON.parse(c.pages || "[]") : c.pages) : [],
-    })),
+    latestUpdateTimestamp,
+    chapters,
   };
 }
 
@@ -154,6 +167,13 @@ export async function getAllMangas(filter?: {
     where,
     include: {
       chapters: {
+        select: {
+          id: true,
+          number: true,
+          title: true,
+          releaseDate: true,
+          createdAt: true,
+        },
         orderBy: { number: "desc" },
         take: 3, // latest chapters for card display
       },
@@ -162,6 +182,9 @@ export async function getAllMangas(filter?: {
   });
 
   let formatted = mangas.map(formatManga);
+
+  // Whichever manga has the newest chapter update sits at the top-left (index 0)
+  formatted.sort((a, b) => b.latestUpdateTimestamp - a.latestUpdateTimestamp);
 
   if (filter?.genre && filter.genre !== "Genre All" && filter.genre !== "ทั้งหมด") {
     formatted = formatted.filter((m) => m.genres.includes(filter.genre!));
@@ -385,13 +408,14 @@ export async function saveScrapedManga(data: {
       },
     });
 
-    // Update manga's latestChapter if this chapter is greater
-    if (chapterNumber > mangaRecord.latestChapter) {
-      await prisma.manga.update({
-        where: { id: mangaRecord.id },
-        data: { latestChapter: chapterNumber },
-      });
-    }
+    // Update manga's latestChapter and updatedAt when a chapter is saved
+    await prisma.manga.update({
+      where: { id: mangaRecord.id },
+      data: {
+        latestChapter: Math.max(chapterNumber, mangaRecord.latestChapter),
+        updatedAt: new Date(),
+      },
+    });
   }
 
   // If chapters list is provided from series page, update latestChapter on mangaRecord (NEVER create empty chapters with pages: [])
