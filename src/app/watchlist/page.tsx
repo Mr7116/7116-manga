@@ -613,6 +613,8 @@ export default function WatchlistPage() {
                 disabled={schedulerLoading}
                 className="bg-transparent text-emerald-400 font-bold focus:outline-none cursor-pointer"
               >
+                <option value={2} className="bg-zinc-900 text-white">ทุก 2 นาที</option>
+                <option value={5} className="bg-zinc-900 text-white">ทุก 5 นาที</option>
                 <option value={10} className="bg-zinc-900 text-white">ทุก 10 นาที</option>
                 <option value={30} className="bg-zinc-900 text-white">ทุก 30 นาที</option>
                 <option value={60} className="bg-zinc-900 text-white">ทุก 1 ชั่วโมง</option>
