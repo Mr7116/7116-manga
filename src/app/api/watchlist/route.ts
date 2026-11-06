@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { normalizeThaiUrl, syncMangaFromUrl } from "@/lib/syncService";
+import { slugify } from "@/lib/mangaService";
 
 export const maxDuration = 60;
 
@@ -41,10 +42,66 @@ export async function GET() {
   }
 }
 
-// POST /api/watchlist - Add a URL to watchlist
+// POST /api/watchlist - Add a URL or list of URLs to watchlist
 export async function POST(request: Request) {
   try {
     const body = await request.json();
+
+    // BULK URL IMPORT: Queue multiple URLs directly into database
+    if (Array.isArray(body.urls) && body.urls.length > 0) {
+      const validUrls: string[] = Array.from(
+        new Set<string>(
+          body.urls
+            .map((u: any) => (typeof u === "string" ? u.trim() : ""))
+            .filter((u: string) => u.startsWith("http://") || u.startsWith("https://"))
+        )
+      );
+
+      if (validUrls.length === 0) {
+        return NextResponse.json(
+          { success: false, error: "ไม่พบ URL ที่ถูกต้องในรายการที่ส่งมา" },
+          { status: 400 }
+        );
+      }
+
+      const createdItems = [];
+      for (const raw of validUrls) {
+        const safeUrl = normalizeThaiUrl(raw);
+        let slug = "";
+        try {
+          const urlObj = new URL(safeUrl);
+          const parts = urlObj.pathname.split("/").filter(Boolean);
+          if (parts.length > 0) {
+            slug = slugify(decodeURIComponent(parts[0]).replace(/[-_](?:ตอนที่|ตอน|chapter|ch|ep)[-_]?\d+.*$/i, ""));
+          }
+        } catch {}
+
+        const item = await prisma.watchedManga.upsert({
+          where: { url: safeUrl },
+          create: {
+            url: safeUrl,
+            slug: slug || "pending-import",
+            title: slug ? slug.replace(/-/g, " ") : safeUrl,
+            status: "active",
+            latestChapterOnWeb: 0,
+            latestChapterInDb: 0,
+            lastSyncedAt: null, // Priority: cron will process these first!
+          },
+          update: {
+            status: "active",
+          },
+        });
+        createdItems.push(item);
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: `เพิ่ม ${createdItems.length} เรื่องเข้าคิวระบบหลังบ้านเรียบร้อยแล้ว`,
+        count: createdItems.length,
+        data: createdItems,
+      });
+    }
+
     const rawUrl = body.url;
     const scanNow = body.scanNow ?? true;
     const maxNewChapters = body.maxNewChapters;

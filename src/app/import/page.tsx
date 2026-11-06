@@ -27,6 +27,7 @@ import {
   ExternalLink,
   Clock,
   Trash2,
+  Cloud,
 } from "lucide-react";
 
 interface ScrapeResult {
@@ -88,6 +89,8 @@ export default function ImportPage() {
   const [batchUrlsInput, setBatchUrlsInput] = useState<string>("");
   const [autoAddToWatchlist, setAutoAddToWatchlist] = useState<boolean>(true);
   const [batchScrapeDepth, setBatchScrapeDepth] = useState<"all" | "recent" | "meta_only">("all");
+  const [cloudQueueLoading, setCloudQueueLoading] = useState<boolean>(false);
+  const [cloudQueueSuccess, setCloudQueueSuccess] = useState<string | null>(null);
 
   const handleScrape = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -346,10 +349,44 @@ export default function ImportPage() {
     }
 
     setError(null);
+    setCloudQueueSuccess(null);
     await startQueue(urls, {
       autoWatchlist: autoAddToWatchlist,
       depth: batchScrapeDepth,
     });
+  };
+
+  const handleSendToCloudQueue = async () => {
+    const urls = parseBatchUrls(batchUrlsInput);
+    if (urls.length === 0) {
+      setError("กรุณากรอก URL อย่างน้อย 1 รายการ (ขึ้นต้นด้วย http:// หรือ https://)");
+      return;
+    }
+
+    setCloudQueueLoading(true);
+    setError(null);
+    setCloudQueueSuccess(null);
+
+    try {
+      const res = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ urls }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "ไม่สามารถส่งข้อมูลเข้าคิวหลังบ้านได้");
+      }
+
+      setCloudQueueSuccess(
+        `✓ ส่ง ${data.count || urls.length} เรื่องเข้าสู่คิวระบบหลังบ้านเรียบร้อยแล้ว! ระบบ Cloud Cron และ Background Worker จะทยอยดึงข้อมูลและดาวน์โหลดตอนใหม่อยู่เบื้องหลังตลอด 24 ชม. คุณสามารถปิดเว็บไปทำอย่างอื่นได้ทันทีครับ`
+      );
+    } catch (err: any) {
+      setError(err.message || "เกิดข้อผิดพลาดในการเชื่อมต่อ");
+    } finally {
+      setCloudQueueLoading(false);
+    }
   };
 
   return (
@@ -501,17 +538,40 @@ export default function ImportPage() {
                 {/* Queue Control Buttons */}
                 <div className="pt-2 flex flex-wrap items-center gap-3">
                   {!isQueueRunning ? (
-                    <button
-                      type="button"
-                      onClick={handleStartQueue}
-                      disabled={parseBatchUrls(batchUrlsInput).length === 0}
-                      className="flex items-center justify-center gap-2 rounded-xl bg-[#46e39a] hover:bg-[#3cd089] px-6 py-3 text-xs sm:text-sm font-black text-zinc-950 shadow-lg shadow-[#46e39a]/20 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      <Zap className="h-4 w-4" />
-                      <span>
-                        เริ่มทยอยดึงข้อมูลตามคิว ({parseBatchUrls(batchUrlsInput).length} เรื่อง)
-                      </span>
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleStartQueue}
+                        disabled={parseBatchUrls(batchUrlsInput).length === 0}
+                        className="flex items-center justify-center gap-2 rounded-xl bg-[#46e39a] hover:bg-[#3cd089] px-5 py-3 text-xs sm:text-sm font-black text-zinc-950 shadow-lg shadow-[#46e39a]/20 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <Zap className="h-4 w-4" />
+                        <span>
+                          เริ่มดึงสดผ่านหน้าเว็บ ({parseBatchUrls(batchUrlsInput).length} เรื่อง)
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleSendToCloudQueue}
+                        disabled={cloudQueueLoading || parseBatchUrls(batchUrlsInput).length === 0}
+                        className="flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:brightness-110 px-5 py-3 text-xs sm:text-sm font-bold text-white shadow-lg shadow-purple-500/25 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {cloudQueueLoading ? (
+                          <>
+                            <Loader2 className="h-4 w-4 animate-spin text-white" />
+                            <span>กำลังส่งเข้าคิว...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Cloud className="h-4 w-4" />
+                            <span>
+                              ส่งเข้าคิวหลังบ้าน (Cloud Cron ทยอยดึง 24 ชม. - ปิดเว็บได้ทันที)
+                            </span>
+                          </>
+                        )}
+                      </button>
+                    </>
                   ) : (
                     <button
                       type="button"
@@ -533,11 +593,24 @@ export default function ImportPage() {
                       <span>ล้างรายการคิว</span>
                     </button>
                   )}
-
-                  <span className="text-[11px] text-zinc-400 bg-zinc-800/40 px-3 py-1.5 rounded-lg border border-zinc-700/40">
-                    💡 ระบบทำงานในพื้นหลัง: คุณสามารถเปลี่ยนไปหน้าอื่น หรือเปิดอ่านตอนอื่นได้ตลอดเวลา
-                  </span>
                 </div>
+
+                {/* Cloud Queue Success Banner */}
+                {cloudQueueSuccess && (
+                  <div className="mt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-purple-500/40 bg-purple-950/30 p-4 text-xs text-purple-200 shadow-lg">
+                    <div className="flex items-center gap-2.5">
+                      <Cloud className="h-5 w-5 shrink-0 text-purple-400" />
+                      <span>{cloudQueueSuccess}</span>
+                    </div>
+                    <Link
+                      href="/watchlist"
+                      className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold transition-colors"
+                    >
+                      <span>ดูรายการใน Watchlist</span>
+                      <ExternalLink className="h-3 w-3" />
+                    </Link>
+                  </div>
+                )}
 
                 {/* Error Banner */}
                 {error && (
