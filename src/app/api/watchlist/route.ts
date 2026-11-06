@@ -76,16 +76,24 @@ export async function POST(request: Request) {
       });
     }
 
-    // Otherwise, create placeholder or basic check
+    // Otherwise, create placeholder or save provided metadata
     const watchedItem = await prisma.watchedManga.upsert({
       where: { url: safeUrl },
       create: {
         url: safeUrl,
-        slug: "",
-        title: safeUrl,
+        slug: body.slug || "",
+        title: body.title || safeUrl,
+        cover: body.cover || null,
         status: "active",
+        latestChapterOnWeb: typeof body.latestChapterOnWeb === "number" ? body.latestChapterOnWeb : 0,
+        latestChapterInDb: typeof body.latestChapterInDb === "number" ? body.latestChapterInDb : 0,
       },
       update: {
+        slug: body.slug ? body.slug : undefined,
+        title: body.title ? body.title : undefined,
+        cover: body.cover ? body.cover : undefined,
+        latestChapterOnWeb: typeof body.latestChapterOnWeb === "number" ? body.latestChapterOnWeb : undefined,
+        latestChapterInDb: typeof body.latestChapterInDb === "number" ? body.latestChapterInDb : undefined,
         status: "active",
       },
     });

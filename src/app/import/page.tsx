@@ -21,6 +21,11 @@ import {
   RefreshCw,
   Zap,
   FastForward,
+  ListFilter,
+  ListChecks,
+  ExternalLink,
+  Clock,
+  Trash2,
 } from "lucide-react";
 
 interface ScrapeResult {
@@ -51,6 +56,20 @@ interface BatchLog {
   error?: string;
 }
 
+interface BatchQueueItem {
+  id: string;
+  url: string;
+  slug?: string;
+  title?: string;
+  cover?: string;
+  totalChapters: number;
+  completedChapters: number;
+  skippedChapters: number;
+  status: "idle" | "scraping_meta" | "saving_manga" | "downloading_chapters" | "success" | "error" | "cancelled";
+  statusText: string;
+  error?: string;
+}
+
 export default function ImportPage() {
   const [url, setUrl] = useState("https://www.go-manga.com/third-rate-martial-family");
   const [loading, setLoading] = useState(false);
@@ -61,11 +80,21 @@ export default function ImportPage() {
   const [existingChapters, setExistingChapters] = useState<number[]>([]);
   const [isReadingMode, setIsReadingMode] = useState(false);
 
-  // Batch Auto-Scrape State
+  // Single URL Batch Auto-Scrape State
   const [isBatchRunning, setIsBatchRunning] = useState(false);
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0, percent: 0, currentTitle: "" });
   const [batchLogs, setBatchLogs] = useState<BatchLog[]>([]);
   const cancelBatchRef = useRef(false);
+
+  // Multi-URL Batch List State
+  const [importMode, setImportMode] = useState<"single" | "batch_list">("single");
+  const [batchUrlsInput, setBatchUrlsInput] = useState<string>("");
+  const [autoAddToWatchlist, setAutoAddToWatchlist] = useState<boolean>(true);
+  const [batchScrapeDepth, setBatchScrapeDepth] = useState<"all" | "recent" | "meta_only">("all");
+  const [isQueueRunning, setIsQueueRunning] = useState<boolean>(false);
+  const [queueProgress, setQueueProgress] = useState({ current: 0, total: 0, percent: 0 });
+  const [queueItems, setQueueItems] = useState<BatchQueueItem[]>([]);
+  const cancelQueueRef = useRef<boolean>(false);
 
   const handleScrape = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -305,6 +334,312 @@ export default function ImportPage() {
     setUrl(sampleUrl);
   };
 
+  const parseBatchUrls = (text: string): string[] => {
+    return Array.from(
+      new Set(
+        text
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.startsWith("http://") || line.startsWith("https://"))
+      )
+    );
+  };
+
+  const handleStartQueue = async () => {
+    const urls = parseBatchUrls(batchUrlsInput);
+    if (urls.length === 0) {
+      setError("กรุณากรอก URL อย่างน้อย 1 รายการ (ขึ้นต้นด้วย http:// หรือ https://)");
+      return;
+    }
+
+    setError(null);
+    setIsQueueRunning(true);
+    cancelQueueRef.current = false;
+
+    // Initialize queue items
+    const initialItems: BatchQueueItem[] = urls.map((u, i) => ({
+      id: `queue-${i}-${Date.now()}`,
+      url: u,
+      totalChapters: 0,
+      completedChapters: 0,
+      skippedChapters: 0,
+      status: "idle",
+      statusText: "รอดำเนินการในคิว",
+    }));
+
+    setQueueItems(initialItems);
+    setQueueProgress({ current: 0, total: urls.length, percent: 0 });
+
+    for (let i = 0; i < initialItems.length; i++) {
+      if (cancelQueueRef.current) {
+        setQueueItems((prev) =>
+          prev.map((item, idx) =>
+            idx >= i && item.status === "idle"
+              ? { ...item, status: "cancelled", statusText: "ยกเลิกคิวแล้ว" }
+              : item
+          )
+        );
+        break;
+      }
+
+      const item = initialItems[i];
+
+      setQueueItems((prev) =>
+        prev.map((it, idx) =>
+          idx === i
+            ? { ...it, status: "scraping_meta", statusText: "กำลังดึงข้อมูลเรื่องและรายชื่อตอน..." }
+            : it
+        )
+      );
+
+      setQueueProgress({
+        current: i + 1,
+        total: initialItems.length,
+        percent: Math.round((i / initialItems.length) * 100),
+      });
+
+      try {
+        // Step 1: Scrape Series Meta
+        const scrapeRes = await fetch("/api/scrape", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: item.url }),
+        });
+
+        const scrapeData = await scrapeRes.json();
+        if (!scrapeRes.ok || !scrapeData.success || !scrapeData.data) {
+          throw new Error(scrapeData.error || "ไม่สามารถเข้าถึง URL ได้");
+        }
+
+        const mangaData = scrapeData.data;
+        const totalCh = mangaData.chapters?.length || 0;
+
+        setQueueItems((prev) =>
+          prev.map((it, idx) =>
+            idx === i
+              ? {
+                  ...it,
+                  title: mangaData.title,
+                  cover: mangaData.cover,
+                  totalChapters: totalCh,
+                  status: "saving_manga",
+                  statusText: "กำลังบันทึกข้อมูลเรื่อง...",
+                }
+              : it
+          )
+        );
+
+        // Step 2: Save Manga into DB
+        const saveRes = await fetch("/api/manga/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: item.url,
+            seriesUrl: item.url,
+            title: mangaData.title,
+            cover: mangaData.cover,
+            synopsis: mangaData.synopsis,
+            chapters: mangaData.chapters || [],
+          }),
+        });
+        const saveJson = await saveRes.json();
+        const slug = saveJson.data?.manga?.slug || "";
+
+        // Step 3: Add to Watchlist (if enabled)
+        if (autoAddToWatchlist) {
+          try {
+            await fetch("/api/watchlist", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                url: item.url,
+                title: mangaData.title,
+                slug,
+                cover: mangaData.cover,
+                scanNow: false,
+                latestChapterOnWeb: totalCh,
+              }),
+            });
+          } catch (e) {
+            console.error("Failed to add to watchlist:", e);
+          }
+        }
+
+        // If meta_only, we're done with this manga!
+        if (batchScrapeDepth === "meta_only" || totalCh === 0) {
+          setQueueItems((prev) =>
+            prev.map((it, idx) =>
+              idx === i
+                ? {
+                    ...it,
+                    slug,
+                    status: "success",
+                    statusText: autoAddToWatchlist
+                      ? "✅ บันทึกเรื่องและเพิ่มเข้า Watchlist เรียบร้อย"
+                      : "✅ บันทึกเรื่องเรียบร้อย",
+                  }
+                : it
+            )
+          );
+          continue;
+        }
+
+        // Step 4: Download Chapters
+        let existingSet = new Set<number>();
+        try {
+          const checkRes = await fetch(
+            `/api/manga/existing-chapters?url=${encodeURIComponent(item.url)}&title=${encodeURIComponent(mangaData.title || "")}`
+          );
+          const checkData = await checkRes.json();
+          if (checkData.success && Array.isArray(checkData.existingNumbers)) {
+            existingSet = new Set(checkData.existingNumbers);
+          }
+        } catch {}
+
+        // Sort chapters oldest to newest
+        const sortedChapters = [...mangaData.chapters].sort((a: any, b: any) => {
+          const numA = parseFloat((a.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || a.url.match(/ตอนที่-(\d+(\.\d+)?)/i) || [, 0])[1] as string) || 0;
+          const numB = parseFloat((b.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || b.url.match(/ตอนที่-(\d+(\.\d+)?)/i) || [, 0])[1] as string) || 0;
+          return numA - numB;
+        });
+
+        // Filter chapters based on scrape depth
+        const targetChapters = batchScrapeDepth === "recent"
+          ? sortedChapters.slice(-5)
+          : sortedChapters;
+
+        let completed = 0;
+        let skipped = 0;
+
+        for (let chIdx = 0; chIdx < targetChapters.length; chIdx++) {
+          if (cancelQueueRef.current) break;
+
+          const ch = targetChapters[chIdx];
+          const match = ch.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || ch.url.match(/ตอนที่-(\d+(\.\d+)?)/i);
+          const chNum = match ? parseFloat(match[1]) : chIdx + 1;
+
+          if (existingSet.has(chNum)) {
+            skipped++;
+            setQueueItems((prev) =>
+              prev.map((it, idx) =>
+                idx === i
+                  ? {
+                      ...it,
+                      skippedChapters: skipped,
+                      statusText: `ข้ามตอนที่ ${chNum} (มีในระบบแล้ว)`,
+                    }
+                  : it
+              )
+            );
+            continue;
+          }
+
+          setQueueItems((prev) =>
+            prev.map((it, idx) =>
+              idx === i
+                ? {
+                    ...it,
+                    status: "downloading_chapters",
+                    currentChapterNumber: chNum,
+                    statusText: `กำลังดึง ${ch.title} (${chIdx + 1}/${targetChapters.length})...`,
+                  }
+                : it
+            )
+          );
+
+          try {
+            const chScrapeRes = await fetch("/api/scrape", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ url: ch.url }),
+            });
+            const chScrapeJson = await chScrapeRes.json();
+            const images = chScrapeJson.data?.images || [];
+
+            if (images.length > 0) {
+              await fetch("/api/manga/save", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  url: ch.url,
+                  seriesUrl: item.url,
+                  title: mangaData.title,
+                  cover: mangaData.cover,
+                  images,
+                  chapterNumber: chNum,
+                  chapterTitle: ch.title,
+                }),
+              });
+              completed++;
+              setQueueItems((prev) =>
+                prev.map((it, idx) =>
+                  idx === i
+                    ? {
+                        ...it,
+                        completedChapters: completed,
+                      }
+                    : it
+                )
+              );
+            }
+          } catch (e) {
+            console.error(`Error scraping chapter ${chNum}:`, e);
+          }
+
+          await new Promise((r) => setTimeout(r, 200));
+        }
+
+        // Update WatchedManga chapter count in DB
+        if (autoAddToWatchlist) {
+          try {
+            await fetch("/api/watchlist", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                url: item.url,
+                title: mangaData.title,
+                slug,
+                cover: mangaData.cover,
+                scanNow: false,
+                latestChapterOnWeb: totalCh,
+                latestChapterInDb: completed + skipped,
+              }),
+            });
+          } catch (e) {}
+        }
+
+        setQueueItems((prev) =>
+          prev.map((it, idx) =>
+            idx === i
+              ? {
+                  ...it,
+                  slug,
+                  status: "success",
+                  statusText: `✅ สำเร็จ! ดึงใหม่ ${completed} ตอน, ข้าม ${skipped} ตอน ${autoAddToWatchlist ? "• เข้า Watchlist แล้ว" : ""}`,
+                }
+              : it
+          )
+        );
+      } catch (err: any) {
+        setQueueItems((prev) =>
+          prev.map((it, idx) =>
+            idx === i
+              ? {
+                  ...it,
+                  status: "error",
+                  statusText: `❌ ล้มเหลว: ${err.message}`,
+                  error: err.message,
+                }
+              : it
+          )
+        );
+      }
+    }
+
+    setIsQueueRunning(false);
+    setQueueProgress((p) => ({ ...p, percent: 100 }));
+  };
+
   return (
     <div className="relative min-h-screen bg-[#0b0e14] text-zinc-100 flex flex-col">
       {/* Background with Ambient Glow */}
@@ -339,6 +674,257 @@ export default function ImportPage() {
               </p>
             </div>
 
+            {/* Mode Selector Tabs */}
+            <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800/80 pb-3 mb-6">
+              <button
+                type="button"
+                onClick={() => setImportMode("single")}
+                className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  importMode === "single"
+                    ? "bg-[#46e39a] text-zinc-950 shadow-md shadow-[#46e39a]/20"
+                    : "bg-[#16181d] text-zinc-400 hover:text-zinc-200 border border-zinc-800 hover:border-zinc-700"
+                }`}
+              >
+                <Zap className="h-3.5 w-3.5" />
+                <span>ดึงทีละเรื่อง (Single URL)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setImportMode("batch_list")}
+                className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  importMode === "batch_list"
+                    ? "bg-[#46e39a] text-zinc-950 shadow-md shadow-[#46e39a]/20"
+                    : "bg-[#16181d] text-zinc-400 hover:text-zinc-200 border border-zinc-800 hover:border-zinc-700"
+                }`}
+              >
+                <ListFilter className="h-3.5 w-3.5" />
+                <span>วางรายชื่อหลายเรื่อง (Multi-URL List & Auto Watchlist)</span>
+                <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-300 text-[10px] font-black">
+                  NEW
+                </span>
+              </button>
+            </div>
+
+            {/* TAB 1: MULTI-URL BATCH QUEUE */}
+            {importMode === "batch_list" && (
+              <div className="space-y-4">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-xs font-bold text-zinc-300">
+                      วาง URL มังงะที่ต้องการนำเข้า (วางได้หลายเรื่อง บรรทัดละ 1 URL):
+                    </label>
+                    <span className="text-[11px] font-bold text-[#46e39a] bg-[#46e39a]/10 px-2.5 py-0.5 rounded-full border border-[#46e39a]/30">
+                      ตรวจพบ {parseBatchUrls(batchUrlsInput).length} รายการ
+                    </span>
+                  </div>
+
+                  <textarea
+                    rows={6}
+                    disabled={isQueueRunning}
+                    placeholder={`https://www.up-manga.com/revenge-of-the-baskerville/\nhttps://www.go-manga.com/infinite-mage/\nhttps://www.up-manga.com/nano-machine/`}
+                    value={batchUrlsInput}
+                    onChange={(e) => setBatchUrlsInput(e.target.value)}
+                    className="w-full rounded-xl border border-zinc-700/80 bg-[#16181d] p-3.5 text-xs sm:text-sm font-mono text-zinc-100 placeholder-zinc-500 focus:border-[#46e39a] focus:outline-none transition-colors"
+                  />
+                </div>
+
+                {/* Preset & Options Toolbar */}
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs bg-[#16181d]/80 p-3.5 rounded-xl border border-zinc-800">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] text-zinc-400">ใส่ตัวอย่างทดสอบ:</span>
+                    <button
+                      type="button"
+                      disabled={isQueueRunning}
+                      onClick={() =>
+                        setBatchUrlsInput(
+                          "https://www.up-manga.com/revenge-of-the-baskerville/\nhttps://www.go-manga.com/third-rate-martial-family/\nhttps://www.up-manga.com/regression-yong-clan-heir/"
+                        )
+                      }
+                      className="rounded-lg bg-[#2b2d33] px-2.5 py-1 text-[11px] text-zinc-300 hover:text-white hover:bg-[#383a42] border border-zinc-700/60 transition-colors"
+                    >
+                      ใส่ตัวอย่าง 3 เรื่อง
+                    </button>
+                    {batchUrlsInput && (
+                      <button
+                        type="button"
+                        disabled={isQueueRunning}
+                        onClick={() => setBatchUrlsInput("")}
+                        className="text-[11px] text-zinc-400 hover:text-rose-400 underline transition-colors ml-1"
+                      >
+                        ล้างกล่องข้อความ
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-4">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoAddToWatchlist}
+                        onChange={(e) => setAutoAddToWatchlist(e.target.checked)}
+                        disabled={isQueueRunning}
+                        className="rounded accent-[#46e39a] w-4 h-4 cursor-pointer"
+                      />
+                      <span className="text-zinc-200 font-bold text-xs">
+                        เพิ่มเข้า Watchlist อัตโนมัติทุกเรื่อง
+                      </span>
+                    </label>
+
+                    <div className="flex items-center gap-1.5 bg-[#111317] px-3 py-1.5 rounded-lg border border-zinc-700">
+                      <span className="text-zinc-400">ความลึก:</span>
+                      <select
+                        value={batchScrapeDepth}
+                        onChange={(e: any) => setBatchScrapeDepth(e.target.value)}
+                        disabled={isQueueRunning}
+                        className="bg-transparent text-[#46e39a] font-bold focus:outline-none cursor-pointer text-xs"
+                      >
+                        <option value="all" className="bg-zinc-900 text-white">ดึงทุกตอน (ข้ามตอนเดิมอัตโนมัติ)</option>
+                        <option value="recent" className="bg-zinc-900 text-white">ดึง 5 ตอนล่าสุด</option>
+                        <option value="meta_only" className="bg-zinc-900 text-white">บันทึกเรื่อง + Watchlist ทันที (ยังไม่โหลดรูป)</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Queue Control Buttons */}
+                <div className="pt-2 flex items-center gap-3">
+                  {!isQueueRunning ? (
+                    <button
+                      type="button"
+                      onClick={handleStartQueue}
+                      disabled={parseBatchUrls(batchUrlsInput).length === 0}
+                      className="flex items-center justify-center gap-2 rounded-xl bg-[#46e39a] hover:bg-[#3cd089] px-6 py-3 text-xs sm:text-sm font-black text-zinc-950 shadow-lg shadow-[#46e39a]/20 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <Zap className="h-4 w-4" />
+                      <span>
+                        เริ่มทยอยดึงข้อมูลตามคิว ({parseBatchUrls(batchUrlsInput).length} เรื่อง)
+                      </span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        cancelQueueRef.current = true;
+                      }}
+                      className="flex items-center justify-center gap-2 rounded-xl bg-rose-500 hover:bg-rose-600 px-6 py-3 text-xs sm:text-sm font-bold text-white shadow-lg shadow-rose-500/20 transition-all cursor-pointer animate-pulse"
+                    >
+                      <Square className="h-4 w-4 fill-current" />
+                      <span>หยุดทำงานชั่วคราว / ยกเลิกคิว</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Error Banner */}
+                {error && (
+                  <div className="mt-4 flex items-center gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3.5 text-xs text-rose-300">
+                    <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
+                    <span>{error}</span>
+                  </div>
+                )}
+
+                {/* QUEUE CARDS & PROGRESS */}
+                {queueItems.length > 0 && (
+                  <div className="mt-8 border-t border-zinc-800 pt-6 space-y-4">
+                    <div className="flex items-center justify-between text-xs font-bold">
+                      <span className="text-white flex items-center gap-2">
+                        <ListChecks className="h-4 w-4 text-[#46e39a]" />
+                        <span>ความคืบหน้ารวม: เรื่องที่ {queueProgress.current} จาก {queueProgress.total}</span>
+                      </span>
+                      <span className="text-[#46e39a]">{queueProgress.percent}%</span>
+                    </div>
+
+                    <div className="h-2 w-full rounded-full bg-zinc-800 overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-emerald-500 to-[#46e39a] transition-all duration-300"
+                        style={{ width: `${queueProgress.percent}%` }}
+                      />
+                    </div>
+
+                    {/* Queue items list */}
+                    <div className="space-y-2.5 mt-5">
+                      {queueItems.map((item, idx) => (
+                        <div
+                          key={item.id}
+                          className={`p-4 rounded-xl border transition-all ${
+                            item.status === "downloading_chapters" || item.status === "scraping_meta" || item.status === "saving_manga"
+                              ? "bg-[#181d24] border-[#46e39a]/60 shadow-lg"
+                              : item.status === "success"
+                              ? "bg-[#141b18] border-emerald-500/30"
+                              : item.status === "error"
+                              ? "bg-[#201518] border-rose-500/30"
+                              : "bg-[#16181d] border-zinc-800/80"
+                          }`}
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div className="flex items-center gap-3.5 min-w-0">
+                              <span className="h-7 w-7 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold text-zinc-300 shrink-0">
+                                {idx + 1}
+                              </span>
+                              {item.cover ? (
+                                <img
+                                  src={item.cover}
+                                  alt={item.title || ""}
+                                  className="w-10 h-14 object-cover rounded-md shadow shrink-0 border border-zinc-700/60"
+                                />
+                              ) : (
+                                <div className="w-10 h-14 bg-zinc-800 rounded-md flex items-center justify-center text-[10px] text-zinc-500 shrink-0">
+                                  No Pic
+                                </div>
+                              )}
+                              <div className="min-w-0">
+                                <h4 className="text-xs sm:text-sm font-bold text-white truncate">
+                                  {item.title || item.url}
+                                </h4>
+                                <p className="text-[11px] text-zinc-400 truncate mt-0.5">
+                                  {item.statusText}
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="shrink-0 flex items-center gap-2 self-end sm:self-center">
+                              {item.status === "success" && (
+                                <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                  ✓ สำเร็จ
+                                </span>
+                              )}
+                              {(item.status === "downloading_chapters" || item.status === "scraping_meta" || item.status === "saving_manga") && (
+                                <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse flex items-center gap-1">
+                                  <Loader2 className="w-3 h-3 animate-spin" /> กำลังประมวลผล
+                                </span>
+                              )}
+                              {item.status === "idle" && (
+                                <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-zinc-800 text-zinc-400">
+                                  ⏳ รอดำเนินการ
+                                </span>
+                              )}
+                              {item.status === "error" && (
+                                <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">
+                                  ❌ ไม่สำเร็จ
+                                </span>
+                              )}
+                              {item.slug && (
+                                <Link
+                                  href={`/manga/${item.slug}`}
+                                  target="_blank"
+                                  className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-zinc-200 hover:text-white transition-colors border border-zinc-700"
+                                >
+                                  <span>เปิดดู</span>
+                                  <ExternalLink className="w-3 h-3" />
+                                </Link>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: SINGLE URL FORM */}
+            {importMode === "single" && (
+              <>
             {/* Form */}
             <form onSubmit={handleScrape} className="space-y-4">
               <div>
@@ -708,6 +1294,8 @@ export default function ImportPage() {
                   </div>
                 )}
               </div>
+            )}
+              </>
             )}
           </div>
         </div>
