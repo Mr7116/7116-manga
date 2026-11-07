@@ -52,6 +52,8 @@ export default function WatchlistPage() {
   const [adding, setAdding] = useState(false);
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [syncProgress, setSyncProgress] = useState<{ done: number; remaining: number } | null>(null);
+  const stopSyncRef = useRef(false);
 
   // Auto-Scheduler States (Persistent)
   const [autoScheduleActive, setAutoScheduleActive] = useState(false);
@@ -311,40 +313,83 @@ export default function WatchlistPage() {
   };
 
   // Sync single manga
+  // Sync one manga repeatedly until every chapter on the source is downloaded.
+  // Each request downloads a batch (~8 chapters); press the button again to stop.
   const handleSyncSingle = async (item: WatchedItem) => {
+    if (syncingId === item.id) {
+      stopSyncRef.current = true;
+      addLog(`⏹ กำลังหยุดซิงค์ [${item.title}] หลังจบรอบนี้...`, "warn");
+      return;
+    }
+    if (syncingId) return;
+
+    stopSyncRef.current = false;
     setSyncingId(item.id);
-    addLog(`⚡ เริ่มต้นซิงค์มังงะ: ${item.title}...`, "info");
+    setSyncProgress(null);
+    addLog(`⚡ เริ่มซิงค์ [${item.title}] ต่อเนื่องจนครบทุกตอน...`, "info");
 
+    let totalNew = 0;
+    let busyRetries = 0;
     try {
-      const res = await fetch("/api/cron/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: item.url }),
-      });
-      const text = await res.text();
-      let data: any;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        throw new Error("เซิร์ฟเวอร์ตอบกลับไม่ถูกต้องหรือหมดเวลาประมวลผล (Timeout)");
-      }
+      for (let round = 1; round <= 200; round++) {
+        if (stopSyncRef.current) {
+          addLog(`⏹ หยุดซิงค์ [${item.title}] แล้ว (ดึงไป ${totalNew} ตอน) ที่เหลือระบบอัตโนมัติจะดึงต่อเอง`, "warn");
+          break;
+        }
 
-      if (data.type === "skipped") {
-        addLog(`⏳ [${item.title}] ระบบกำลังซิงค์รอบอื่นอยู่ ลองใหม่อีกครั้งในไม่กี่วินาที`, "warn");
-      } else if (data.success && data.data) {
+        const res = await fetch("/api/cron/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: item.url }),
+        });
+        const text = await res.text();
+        let data: any;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          throw new Error("เซิร์ฟเวอร์ตอบกลับไม่ถูกต้องหรือหมดเวลาประมวลผล (Timeout)");
+        }
+
+        // Background sync holds the lock: wait and try again
+        if (data.type === "skipped") {
+          if (++busyRetries > 12) throw new Error("ระบบหลังบ้านกำลังซิงค์อยู่นานเกินไป ลองใหม่ภายหลัง");
+          await new Promise((r) => setTimeout(r, 5000));
+          round--;
+          continue;
+        }
+        busyRetries = 0;
+
+        if (!data.success || !data.data) {
+          throw new Error(data.error || "ซิงค์ไม่สำเร็จ");
+        }
+
         const r = data.data;
+        totalNew += r.newChaptersDownloaded || 0;
+        const remaining = r.remainingMissingChapters ?? 0;
+        setSyncProgress({ done: totalNew, remaining });
         addLog(
-          `✅ ซิงค์สำเร็จ [${r.title}]: ข้ามตอนเดิม ${r.skippedExistingChapters} ตอน | โหลดตอนใหม่ ${r.newChaptersDownloaded} ตอน (ตอนล่าสุดเว็บ: ${r.latestChapterOnWeb})`,
-          "success"
+          `📥 [${r.title}] รอบที่ ${round}: โหลดใหม่ ${r.newChaptersDownloaded} ตอน | เหลือ ${remaining} ตอน`,
+          r.newChaptersDownloaded > 0 ? "success" : "info"
         );
-        await fetchWatchlist();
-      } else {
-        addLog(`❌ ซิงค์ไม่สำเร็จ [${item.title}]: ${data.error}`, "error");
+        fetchWatchlist();
+
+        if (remaining <= 0) {
+          addLog(`✅ [${r.title}] ซิงค์ครบทุกตอนแล้ว (โหลดใหม่รวม ${totalNew} ตอน)`, "success");
+          break;
+        }
+        if (r.newChaptersDownloaded === 0) {
+          // Nothing more could be downloaded (source/mirror has no images for the rest)
+          const failed = (r.failedChapterNumbers || []).map((n: number) => `ตอนที่ ${n}`).join(", ");
+          addLog(`⚠️ [${r.title}] ยังขาด ${remaining} ตอนที่ดึงรูปไม่ได้${failed ? `: ${failed}` : ""}`, "warn");
+          break;
+        }
       }
     } catch (err: any) {
       addLog(`❌ ซิงค์ล้มเหลว [${item.title}]: ${err.message}`, "error");
     } finally {
       setSyncingId(null);
+      setSyncProgress(null);
+      await fetchWatchlist();
     }
   };
 
@@ -804,11 +849,19 @@ export default function WatchlistPage() {
                       {/* Sync This Manga */}
                       <button
                         onClick={() => handleSyncSingle(item)}
-                        disabled={isSyncingThis}
+                        disabled={syncingAll || (!!syncingId && syncingId !== item.id)}
                         className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-xs font-bold transition-all disabled:opacity-50"
                       >
                         <RefreshCw className={`w-3.5 h-3.5 ${isSyncingThis ? "animate-spin" : ""}`} />
-                        <span>{isSyncingThis ? "กำลังซิงค์..." : "⚡ ซิงค์เรื่องนี้"}</span>
+                        <span>
+                          {syncingId === item.id
+                            ? syncProgress
+                              ? `ได้ ${syncProgress.done} / เหลือ ${syncProgress.remaining} (กดเพื่อหยุด)`
+                              : "กำลังซิงค์... (กดเพื่อหยุด)"
+                            : isSyncingThis
+                              ? "กำลังซิงค์..."
+                              : "⚡ ซิงค์จนครบ"}
+                        </span>
                       </button>
 
                       {/* Delete */}
