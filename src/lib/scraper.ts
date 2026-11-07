@@ -393,3 +393,50 @@ export async function scrapeChapterImages(chapterUrl: string): Promise<string[]>
     return [];
   }
 }
+
+// ---------------------------------------------------------------------------
+// Mirror fallback: sites that publish the same series under the same URL paths
+// (e.g. up-manga.com and go-manga.com). If a chapter page on one host has no
+// images, the same path is tried on the other hosts in the group.
+// Configure with MIRROR_HOSTS="host1,host2;hostA,hostB" (groups separated by ";").
+// ---------------------------------------------------------------------------
+const DEFAULT_MIRROR_GROUPS = "www.up-manga.com,www.go-manga.com";
+
+function mirrorGroups(): string[][] {
+  return (process.env.MIRROR_HOSTS || DEFAULT_MIRROR_GROUPS)
+    .split(";")
+    .map((g) => g.split(",").map((h) => h.trim().toLowerCase()).filter(Boolean))
+    .filter((g) => g.length > 1);
+}
+
+/** Same path on the other hosts of the URL's mirror group (empty if the host has no mirrors). */
+export function mirrorUrlsFor(url: string): string[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return [];
+  }
+  const host = parsed.hostname.toLowerCase();
+  const bare = host.replace(/^www\./, "");
+  const group = mirrorGroups().find((g) => g.some((h) => h === host || h.replace(/^www\./, "") === bare));
+  if (!group) return [];
+  return group
+    .filter((h) => h.replace(/^www\./, "") !== bare)
+    .map((h) => {
+      const u = new URL(parsed.toString());
+      u.hostname = h;
+      return u.toString();
+    });
+}
+
+/** Chapter images from the given URL, falling back to mirror sites when it has none. */
+export async function scrapeChapterImagesWithFallback(
+  chapterUrl: string
+): Promise<{ images: string[]; sourceUrl: string | null }> {
+  for (const url of [chapterUrl, ...mirrorUrlsFor(chapterUrl)]) {
+    const images = await scrapeChapterImages(url);
+    if (images.length > 0) return { images, sourceUrl: url };
+  }
+  return { images: [], sourceUrl: null };
+}

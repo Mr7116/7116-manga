@@ -2,7 +2,7 @@ import { prisma } from "./prisma";
 import { revalidatePath } from "next/cache";
 import { findMatchingMangaSlug, newMangaDefaults, scrapedMetaUpdate } from "./mangaService";
 import { slugFromUrl, slugify } from "./slug";
-import { normalizeThaiUrl, scrapeChapterImages, scrapePage } from "./scraper";
+import { normalizeThaiUrl, scrapeChapterImages, scrapeChapterImagesWithFallback, scrapePage } from "./scraper";
 
 export { normalizeThaiUrl, scrapeChapterImages };
 
@@ -139,7 +139,11 @@ export async function syncMangaFromUrl(
       break;
     }
     try {
-      const pages = await scrapeChapterImages(ch.url);
+      // Falls back to the same chapter path on mirror sites (MIRROR_HOSTS) when the source has no images
+      const { images: pages, sourceUrl } = await scrapeChapterImagesWithFallback(ch.url);
+      if (sourceUrl && sourceUrl !== ch.url) {
+        console.log(`Chapter ${ch.number} of ${slug} loaded from mirror: ${sourceUrl}`);
+      }
       if (pages.length > 0) {
         await prisma.chapter.upsert({
           where: { mangaId_number: { mangaId: mangaRecord.id, number: ch.number } },
