@@ -13,7 +13,8 @@ export const SYNC_TIME_BUDGET_MS = Number(process.env.SYNC_TIME_BUDGET_MS) || 40
 /** Watched manga checked per scheduled run (oldest-synced first, so all get rotated through). */
 export const SYNC_BATCH_SIZE = Number(process.env.SYNC_BATCH_SIZE) || 3;
 /** Max new chapters downloaded per manga per run (the rest are picked up on later runs). */
-export const SYNC_MAX_NEW_CHAPTERS = Number(process.env.SYNC_MAX_NEW_CHAPTERS) || 3;
+// The time budget is the real limit; this cap just stops one huge backlog from starving the batch.
+export const SYNC_MAX_NEW_CHAPTERS = Number(process.env.SYNC_MAX_NEW_CHAPTERS) || 8;
 
 // Smart incremental sync for a single manga series URL
 export async function syncMangaFromUrl(
@@ -130,6 +131,7 @@ export async function syncMangaFromUrl(
     : missingChapters;
 
   const downloadedChapters: number[] = [];
+  const failedChapters: number[] = []; // page loaded but no images found / request failed
 
   // 5. Download only new/missing chapters, within the time budget
   for (const ch of chaptersToDownload) {
@@ -155,9 +157,12 @@ export async function syncMangaFromUrl(
           },
         });
         downloadedChapters.push(ch.number);
+      } else {
+        failedChapters.push(ch.number);
       }
     } catch (err) {
       console.error(`Failed to scrape chapter ${ch.number}:`, err);
+      failedChapters.push(ch.number);
     }
     await new Promise((r) => setTimeout(r, 300)); // be polite to the source site
   }
@@ -174,15 +179,24 @@ export async function syncMangaFromUrl(
     try {
       revalidatePath("/");
       revalidatePath(`/manga/${slug}`);
+      // chapter pages are cached for an hour; refresh the ones we (re)downloaded
+      for (const n of downloadedChapters) revalidatePath(`/manga/${slug}/${n}`);
     } catch {}
   }
 
   const allDbChapterNumbers = Array.from(completedChapterSet).concat(downloadedChapters);
   const latestDbChapterNumber = allDbChapterNumbers.length > 0 ? Math.max(...allDbChapterNumbers) : 0;
 
-  // 6. Update watchlist entry. If chapters are missing but none could be downloaded,
-  // leave lastSyncedAt untouched so this manga stays at the front of the rotation.
-  const hasUnresolvedChapters = missingChapters.length > 0 && downloadedChapters.length === 0;
+  // 6. Update watchlist entry. Always advance lastSyncedAt so a manga whose chapters can't be
+  // scraped doesn't hog the front of the rotation; failed chapters are retried on its next turn
+  // and reported in lastError.
+  const syncError =
+    failedChapters.length > 0
+      ? `ดึงรูปไม่ได้ ${failedChapters.length} ตอน: ${failedChapters
+          .slice(0, 10)
+          .map((n) => `ตอนที่ ${n}`)
+          .join(", ")}${failedChapters.length > 10 ? " …" : ""}`
+      : null;
 
   await prisma.watchedManga.upsert({
     where: { url: safeUrl },
@@ -194,7 +208,8 @@ export async function syncMangaFromUrl(
       status: "active",
       latestChapterOnWeb: latestWebChapter,
       latestChapterInDb: latestDbChapterNumber,
-      lastSyncedAt: hasUnresolvedChapters ? undefined : new Date(),
+      lastSyncedAt: new Date(),
+      lastError: syncError,
     },
     update: {
       slug,
@@ -202,8 +217,8 @@ export async function syncMangaFromUrl(
       cover: cover || undefined,
       latestChapterOnWeb: latestWebChapter,
       latestChapterInDb: latestDbChapterNumber,
-      lastSyncedAt: hasUnresolvedChapters ? undefined : new Date(),
-      lastError: null,
+      lastSyncedAt: new Date(),
+      lastError: syncError,
     },
   });
 
@@ -214,6 +229,7 @@ export async function syncMangaFromUrl(
     skippedExistingChapters: completedChapterSet.size,
     newChaptersDownloaded: downloadedChapters.length,
     downloadedChapterNumbers: downloadedChapters,
+    failedChapterNumbers: failedChapters,
     remainingMissingChapters: missingChapters.length - downloadedChapters.length,
     latestChapterOnWeb: latestWebChapter,
   };

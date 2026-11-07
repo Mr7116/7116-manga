@@ -21,21 +21,29 @@ export async function GET(request: Request) {
     const mangas = slugs.length
       ? await prisma.manga.findMany({
           where: { slug: { in: slugs } },
-          select: {
-            slug: true,
-            latestChapter: true,
-            _count: { select: { chapters: true } },
-          },
+          select: { id: true, slug: true },
         })
       : [];
-    const bySlug = new Map(mangas.map((m) => [m.slug, m]));
+
+    // Count only chapters that actually have pages (Manga.latestChapter is bumped from the
+    // source's chapter list and does not mean the chapter has been downloaded yet)
+    const stats = mangas.length
+      ? await prisma.chapter.groupBy({
+          by: ["mangaId"],
+          where: { mangaId: { in: mangas.map((m) => m.id) }, pages: { not: "[]" } },
+          _count: { _all: true },
+          _max: { number: true },
+        })
+      : [];
+    const statsByMangaId = new Map(stats.map((s) => [s.mangaId, s]));
+    const statsBySlug = new Map(mangas.map((m) => [m.slug, statsByMangaId.get(m.id)]));
 
     const enrichedList = list.map((item) => {
-      const manga = bySlug.get(item.slug);
+      const s = statsBySlug.get(item.slug);
       return {
         ...item,
-        totalChaptersInDb: manga?._count?.chapters || 0,
-        latestChapterInDb: manga?.latestChapter || item.latestChapterInDb || 0,
+        totalChaptersInDb: s?._count._all || 0,
+        latestChapterInDb: s?._max.number || 0,
       };
     });
 

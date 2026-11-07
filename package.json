@@ -10,7 +10,8 @@
     "postinstall": "prisma generate",
     "sync:daemon": "node scripts/sync-daemon.mjs",
     "cron:setup": "node scripts/setup-supabase-cron.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:manga": "node scripts/check-manga.mjs"
   },
   "dependencies": {
     "@prisma/client": "6.4.1",

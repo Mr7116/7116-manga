@@ -690,8 +690,12 @@ export default function WatchlistPage() {
           ) : (
             <div className="grid grid-cols-1 gap-4">
               {watchlist.map((item) => {
-                const effectiveDbLatest = item.latestChapterInDb || item.totalChaptersInDb;
-                const missingCount = Math.max(0, item.latestChapterOnWeb - effectiveDbLatest);
+                // Missing = chapters on the source not yet downloaded (gaps count too, e.g. 3 of 48)
+                const missingCount = Math.max(
+                  0,
+                  item.latestChapterOnWeb - item.latestChapterInDb,
+                  Math.floor(item.latestChapterOnWeb) - item.totalChaptersInDb
+                );
                 const isSyncingThis = syncingId === item.id || syncingAll;
 
                 return (
@@ -761,7 +765,7 @@ export default function WatchlistPage() {
                           <div>
                             ในระบบ:{" "}
                             <span className="font-bold text-white">
-                              ตอนที่ {effectiveDbLatest}
+                              {item.totalChaptersInDb > 0 ? `ตอนที่ ${item.latestChapterInDb}` : "ยังไม่มีตอน"}
                             </span>{" "}
                             <span className="text-[11px] text-zinc-500">({item.totalChaptersInDb} ตอน)</span>
                           </div>
@@ -780,6 +784,12 @@ export default function WatchlistPage() {
                               : "ยังไม่เคยซิงค์"}
                           </div>
                         </div>
+                        {item.lastError && (
+                          <div className="mt-1 text-[11px] text-amber-400 flex items-center gap-1">
+                            <AlertCircle className="w-3 h-3 shrink-0" />
+                            <span className="truncate">{item.lastError}</span>
+                          </div>
+                        )}
                       </div>
                     </div>
 

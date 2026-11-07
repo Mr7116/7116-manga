@@ -189,29 +189,22 @@ function extractImages($: cheerio.CheerioAPI, html: string, pageUrl: string) {
 }
 
 function extractChapters($: cheerio.CheerioAPI, pageUrl: string): ScrapedChapterLink[] {
-  const chapters: ScrapedChapterLink[] = [];
-  const seenNumbers = new Set<number>();
+  type Raw = { url: string; text: string; releaseDate?: string; textNum: number | null; urlNum: number | null };
+  const raws: Raw[] = [];
   const seenUrls = new Set<string>();
 
-  const add = (href: string | undefined, text: string, releaseDate?: string) => {
+  const collect = (href: string | undefined, text: string, releaseDate?: string) => {
     if (!href || href.startsWith("#")) return;
     const url = absolutize(href, pageUrl);
     if (!url || seenUrls.has(url)) return;
-    const looksLikeChapter = isChapterUrl(url) || /ตอนที่|ตอน|chapter/i.test(text);
-    if (!looksLikeChapter) return;
-
-    const number = parseChapterNumber(text, url);
-    if (number !== null) {
-      if (seenNumbers.has(number)) return;
-      seenNumbers.add(number);
-    }
+    if (!isChapterUrl(url) && !/ตอนที่|ตอน|chapter/i.test(text)) return;
     seenUrls.add(url);
-    const cleanText = text.replace(/\s+/g, " ").trim();
-    chapters.push({
-      number,
-      title: number !== null ? `ตอนที่ ${number}` : cleanText.slice(0, 120) || "ตอน",
+    raws.push({
       url,
+      text: text.replace(/\s+/g, " ").trim(),
       releaseDate: releaseDate || undefined,
+      textNum: parseChapterNumber(text, null),
+      urlNum: parseChapterNumber(null, url),
     });
   };
 
@@ -221,19 +214,51 @@ function extractChapters($: cheerio.CheerioAPI, pageUrl: string): ScrapedChapter
     const link = $el.find("a").first();
     const text = $el.find(".chapternum").text().trim() || link.text().trim() || $el.text().trim();
     const date = $el.find(".chapterdate, .chapter-release-date").first().text().trim();
-    add(link.attr("href"), text, date);
+    collect(link.attr("href"), text, date);
   });
 
   // Chapter page dropdown
   $("select#chapter option, select.chapter-select option").each((_, el) => {
-    add($(el).attr("value"), $(el).text().trim());
+    collect($(el).attr("value"), $(el).text().trim());
   });
 
   // Last resort: any chapter-looking link inside the content area
-  if (chapters.length === 0) {
+  if (raws.length === 0) {
     $(".entry-content a").each((_, el) => {
       const text = $(el).text().trim();
-      if (text.length > 0 && text.length < 120) add($(el).attr("href"), text);
+      if (text.length > 0 && text.length < 120) collect($(el).attr("href"), text);
+    });
+  }
+
+  // Resolve numbers. The label text is preferred, but sources sometimes mislabel a chapter
+  // (e.g. chapter 139 labelled "ตอนที่ 13"). When the same label number appears more than once
+  // and the URL says something else, trust the URL for that row.
+  const textCounts = new Map<number, number>();
+  for (const r of raws) {
+    if (r.textNum !== null) textCounts.set(r.textNum, (textCounts.get(r.textNum) ?? 0) + 1);
+  }
+
+  const chapters: ScrapedChapterLink[] = [];
+  const seenNumbers = new Set<number>();
+  for (const r of raws) {
+    let number = r.textNum ?? r.urlNum;
+    if (
+      r.textNum !== null &&
+      r.urlNum !== null &&
+      r.textNum !== r.urlNum &&
+      (textCounts.get(r.textNum) ?? 0) > 1
+    ) {
+      number = r.urlNum;
+    }
+    if (number !== null) {
+      if (seenNumbers.has(number)) continue;
+      seenNumbers.add(number);
+    }
+    chapters.push({
+      number,
+      title: number !== null ? `ตอนที่ ${number}` : r.text.slice(0, 120) || "ตอน",
+      url: r.url,
+      releaseDate: r.releaseDate,
     });
   }
 
