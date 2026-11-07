@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import SchedulerManager from "@/components/SchedulerManager";
 import { QueueProvider } from "@/context/QueueContext";
 import FloatingQueueWidget from "@/components/FloatingQueueWidget";
 
@@ -29,7 +28,6 @@ export default function RootLayout({
     <html lang="th" className={`${geistSans.variable} ${geistMono.variable} dark`}>
       <body className="min-h-screen bg-zinc-950 text-zinc-100 antialiased selection:bg-rose-500 selection:text-white">
         <QueueProvider>
-          <SchedulerManager />
           {children}
           <FloatingQueueWidget />
         </QueueProvider>

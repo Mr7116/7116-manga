@@ -170,7 +170,7 @@ export default function MangaListSection({ initialMangas }: MangaListSectionProp
               </div>
               <div className="flex items-center gap-4 text-zinc-400">
                 <span>ตอนที่ {manga.latestChapter}</span>
-                <span className="text-[#f59e0b] font-bold">★ {manga.rating}</span>
+                {manga.rating > 0 && <span className="text-[#f59e0b] font-bold">★ {manga.rating}</span>}
               </div>
             </div>
           ))}

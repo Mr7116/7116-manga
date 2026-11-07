@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { saveScrapedManga } from "@/lib/mangaService";
+import { requireAuth } from "@/lib/auth";
 
 export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
+  const denied = requireAuth(req);
+  if (denied) return denied;
+
   try {
     const rawBody = await req.json();
 
@@ -33,6 +37,11 @@ export async function POST(req: NextRequest) {
       chapters: payload.chapters || [],
       chapterNumber: typeof payload.chapterNumber === "number" ? payload.chapterNumber : undefined,
       chapterTitle: payload.chapterTitle || undefined,
+      genres: Array.isArray(payload.genres) ? payload.genres.filter((g: unknown) => typeof g === "string") : undefined,
+      type: typeof payload.type === "string" ? payload.type : undefined,
+      status: typeof payload.status === "string" ? payload.status : undefined,
+      author: typeof payload.author === "string" ? payload.author : undefined,
+      artist: typeof payload.artist === "string" ? payload.artist : undefined,
     });
 
     return NextResponse.json({

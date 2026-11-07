@@ -46,14 +46,19 @@ export async function updateSchedulerConfig(updates: {
   const current = await getSchedulerConfig();
 
   const newEnabled = updates.enabled !== undefined ? updates.enabled : current.enabled;
-  const newInterval = updates.intervalMinutes !== undefined ? updates.intervalMinutes : current.intervalMinutes;
+  const requested = updates.intervalMinutes !== undefined ? updates.intervalMinutes : current.intervalMinutes;
+  // The external trigger fires every 2 minutes, so anything shorter can't be honoured
+  const newInterval = Math.min(Math.max(Math.round(requested), 2), 24 * 60);
 
   let newNextSyncAt = current.nextSyncAt;
 
-  if (newEnabled) {
-    // If enabling or changing interval, compute next sync time
-    const baseTime = current.lastSyncedAt ? Math.max(Date.now(), new Date(current.lastSyncedAt).getTime()) : Date.now();
-    newNextSyncAt = new Date(baseTime + newInterval * 60 * 1000).toISOString();
+  if (newEnabled && !current.enabled) {
+    // Just switched on: run on the very next tick
+    newNextSyncAt = new Date().toISOString();
+  } else if (newEnabled) {
+    // Interval changed while running: next run = last run + new interval (may already be due)
+    const base = current.lastSyncedAt ? new Date(current.lastSyncedAt).getTime() : Date.now();
+    newNextSyncAt = new Date(base + newInterval * 60 * 1000).toISOString();
   } else {
     newNextSyncAt = null;
   }
@@ -79,26 +84,33 @@ export async function updateSchedulerConfig(updates: {
   return updatedConfig;
 }
 
-export async function recordSchedulerRun(): Promise<SchedulerConfig> {
+/**
+ * Should a scheduled tick run a sync now?
+ * The external trigger (pg_cron / cron-job.org) fires every 2 minutes; the interval
+ * chosen on /watchlist decides how many of those ticks actually do work.
+ * A 45s grace window absorbs trigger jitter so "every 2 minutes" doesn't become every 4.
+ */
+export function isSyncDue(config: SchedulerConfig, now = Date.now()): boolean {
+  if (!config.enabled) return false;
+  if (!config.nextSyncAt) return true;
+  return new Date(config.nextSyncAt).getTime() - 45_000 <= now;
+}
+
+/** Record a finished run. Next run is scheduled from when this run STARTED. */
+export async function recordSchedulerRun(startedAt: Date = new Date()): Promise<SchedulerConfig> {
   const current = await getSchedulerConfig();
-  const now = new Date();
-  const next = new Date(now.getTime() + current.intervalMinutes * 60 * 1000);
+  const next = new Date(startedAt.getTime() + current.intervalMinutes * 60 * 1000);
 
   const updatedConfig: SchedulerConfig = {
     ...current,
-    lastSyncedAt: now.toISOString(),
+    lastSyncedAt: startedAt.toISOString(),
     nextSyncAt: current.enabled ? next.toISOString() : null,
   };
 
   await prisma.systemSetting.upsert({
     where: { key: SETTING_KEY },
-    create: {
-      key: SETTING_KEY,
-      value: JSON.stringify(updatedConfig),
-    },
-    update: {
-      value: JSON.stringify(updatedConfig),
-    },
+    create: { key: SETTING_KEY, value: JSON.stringify(updatedConfig) },
+    update: { value: JSON.stringify(updatedConfig) },
   });
 
   return updatedConfig;

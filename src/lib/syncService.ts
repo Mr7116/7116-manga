@@ -1,72 +1,21 @@
 import { prisma } from "./prisma";
-import * as cheerio from "cheerio";
-import { slugify, findMatchingMangaSlug } from "./mangaService";
 import { revalidatePath } from "next/cache";
+import { findMatchingMangaSlug, newMangaDefaults, scrapedMetaUpdate } from "./mangaService";
+import { slugFromUrl, slugify } from "./slug";
+import { normalizeThaiUrl, scrapeChapterImages, scrapePage } from "./scraper";
 
-// Helper to safely normalize Thai URLs
-export function normalizeThaiUrl(inputUrl: string): string {
-  try {
-    const trimmed = inputUrl.trim();
-    const decoded = decodeURI(trimmed);
-    return encodeURI(decoded);
-  } catch {
-    return encodeURI(inputUrl.trim());
-  }
-}
+export { normalizeThaiUrl, scrapeChapterImages };
 
-// Scrape a single chapter's images
-export async function scrapeChapterImages(chapterUrl: string): Promise<string[]> {
-  const safeUrl = normalizeThaiUrl(chapterUrl);
-  try {
-    const response = await fetch(safeUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept":
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
-      },
-      signal: AbortSignal.timeout(8000),
-      next: { revalidate: 0 },
-    });
+const PLACEHOLDER_COVER = "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=600";
 
-    if (!response.ok) return [];
+/** Total time one sync run may spend scraping. Route maxDuration is 60s, so keep headroom. */
+export const SYNC_TIME_BUDGET_MS = Number(process.env.SYNC_TIME_BUDGET_MS) || 40_000;
+/** Watched manga checked per scheduled run (oldest-synced first, so all get rotated through). */
+export const SYNC_BATCH_SIZE = Number(process.env.SYNC_BATCH_SIZE) || 3;
+/** Max new chapters downloaded per manga per run (the rest are picked up on later runs). */
+export const SYNC_MAX_NEW_CHAPTERS = Number(process.env.SYNC_MAX_NEW_CHAPTERS) || 3;
 
-    const buffer = await response.arrayBuffer();
-    const html = new TextDecoder("utf-8").decode(buffer);
-
-    // Pattern A: ts_reader.run
-    const tsReaderMatch = html.match(/ts_reader\.run\(([\s\S]*?)\);/);
-    if (tsReaderMatch && tsReaderMatch[1]) {
-      try {
-        const data = JSON.parse(tsReaderMatch[1]);
-        if (data.sources && Array.isArray(data.sources)) {
-          for (const src of data.sources) {
-            if (Array.isArray(src.images) && src.images.length > 0) {
-              return src.images;
-            }
-          }
-        }
-      } catch {}
-    }
-
-    // Pattern B: DOM images
-    const $ = cheerio.load(html);
-    const images: string[] = [];
-    $("#readerarea img, .reading-content img").each((_, el) => {
-      const src = $(el).attr("data-src") || $(el).attr("src");
-      if (src && !src.includes(".gif") && !src.includes("logo") && !src.includes("readerarea.svg")) {
-        images.push(src);
-      }
-    });
-
-    return images;
-  } catch {
-    return [];
-  }
-}
-
-// Smart Incremental Sync Engine for a Single Manga URL
+// Smart incremental sync for a single manga series URL
 export async function syncMangaFromUrl(
   seriesUrl: string,
   options?: {
@@ -79,125 +28,47 @@ export async function syncMangaFromUrl(
 ) {
   const safeUrl = normalizeThaiUrl(seriesUrl);
 
-  // 1. Fetch series main page with 3.5s timeout
-  const response = await fetch(safeUrl, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Accept":
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
-    },
-    signal: AbortSignal.timeout(8000),
-    next: { revalidate: 0 },
-  });
+  // 1. Scrape the series page (10s timeout inside fetchHtml)
+  const page = await scrapePage(safeUrl);
+  const { title, cover, synopsis } = page;
 
-  if (!response.ok) {
-    throw new Error(`ไม่สามารถเข้าถึง URL ได้ (HTTP Status: ${response.status})`);
-  }
-
-  const buffer = await response.arrayBuffer();
-  const html = new TextDecoder("utf-8").decode(buffer);
-  const $ = cheerio.load(html);
-
-  // Extract Series Info
-  let rawTitle =
-    $('meta[property="og:title"]').attr("content") ||
-    $("h1").first().text().trim() ||
-    $("title").text().trim();
-
-  let title = rawTitle
-    .replace(/\s*\|\s*Go-Manga.*$/i, "")
-    .replace(/\s*\|\s*.*$/, "")
-    .replace(/ตอนที่\s*\d+.*$/i, "")
-    .replace(/^อ่านมังงะ\s+เรื่อง\s+/i, "")
-    .replace(/^อ่านมังงะ\s+/i, "")
-    .replace(/^มังงะ\s+เรื่อง\s+/i, "")
-    .replace(/^มังงะ\s+/i, "")
-    .replace(/\s+แปลไทย.*$/i, "")
-    .trim();
-
-  // Extract True Series Poster Cover
-  let cover = "";
-  const tMatch = html.match(/"t":\s*"([^"]+\.(?:jpg|jpeg|png|webp))"/i);
-  if (tMatch && tMatch[1]) {
-    cover = tMatch[1].replace(/\\\/|\/\\/g, "/");
-  }
-  if (!cover) {
-    cover =
-      $('.thumb img, .summary_image img, .cover img, .series-cover img').first().attr("src") ||
-      $('meta[property="og:image"]').attr("content") ||
-      "";
-  }
-
-  let synopsis =
-    $('meta[property="og:description"]').attr("content") ||
-    $(".entry-content p").first().text().trim() ||
-    "";
-
-  // Derive Slug
+  // 2. Resolve slug: explicit > existing watchlist entry > URL > title (+ exact-title cross-source match)
   let slug = options?.targetSlug || "";
   if (!slug) {
-    try {
-      const urlObj = new URL(safeUrl);
-      const pathParts = urlObj.pathname.split("/").filter(Boolean);
-      if (pathParts.length > 0) {
-        slug = slugify(decodeURIComponent(pathParts[0]).replace(/[-_](?:ตอนที่|ตอน|chapter|ch|ep)[-_]?\d+.*$/i, ""));
-      }
-    } catch {}
-    if (!slug) slug = slugify(title);
-
-    // Cross-source Smart Matching: check if this URL maps to an existing WatchedManga or matches by title
     const existingWatch = await prisma.watchedManga.findUnique({
       where: { url: safeUrl },
       select: { slug: true },
     });
-    if (existingWatch?.slug) {
+    if (existingWatch?.slug && existingWatch.slug !== "pending-import") {
       slug = existingWatch.slug;
     } else {
-      slug = await findMatchingMangaSlug(slug, title);
+      slug = await findMatchingMangaSlug(slugFromUrl(safeUrl) || slugify(title), title);
     }
   }
 
-  // Extract all chapters available on web
-  const webChapters: { number: number; title: string; url: string; releaseDate?: string }[] = [];
-  $(".eplister li, .clplist li, ul.chapters li, .chapter-list li, .eplister a, .clplist a, select#chapter option").each((_, el) => {
-    const $el = $(el);
-    const linkEl = $el.is("a") ? $el : $el.find("a").first();
-    const linkHref = linkEl.attr("href") || $el.attr("value");
-    const numText = $el.find(".chapternum").text().trim() || linkEl.text().trim() || $el.text().trim();
-    const dateText = $el.find(".chapterdate").text().trim();
+  // Only chapters with a parseable number can be stored
+  const webChapters = page.chapters.filter(
+    (c): c is typeof c & { number: number } => c.number !== null
+  );
+  const latestWebChapter = webChapters.length > 0 ? Math.max(...webChapters.map((c) => c.number)) : 0;
 
-    if (linkHref && (linkHref.includes("chapter") || linkHref.includes("ตอนที่") || /ตอนที่|\bch\b/i.test(numText))) {
-      let fullUrl = linkHref;
-      if (!fullUrl.startsWith("http")) {
-        try {
-          fullUrl = new URL(linkHref, safeUrl).toString();
-        } catch {
-          return;
-        }
-      }
-      const match = numText.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || fullUrl.match(/ตอนที่-(\d+(\.\d+)?)/i);
-      if (match && match[1]) {
-        const num = parseFloat(match[1]);
-        if (!webChapters.some((c) => c.number === num)) {
-          webChapters.push({
-            number: num,
-            title: `ตอนที่ ${num}`,
-            url: fullUrl,
-            releaseDate: dateText || undefined,
-          });
-        }
-      }
-    }
-  });
-
-  const latestWebChapter = webChapters.length > 0 ? Math.max(...webChapters.map((c) => c.number)) : 1;
-
-  // 2. Ensure Manga Record exists in DB (avoid touching updatedAt on existing manga during routine cron checks)
+  // 3. Ensure Manga record exists (don't touch updatedAt during routine checks)
   const existingManga = await prisma.manga.findUnique({ where: { slug } });
   const isPosterCover = cover && !cover.includes("-ep") && !cover.includes("-ตอนที่-");
-  const shouldUpdateCover = cover && (!existingManga?.cover || existingManga.cover.includes("-ep") || existingManga.cover.includes("-ตอนที่-") || (isPosterCover && existingManga.cover !== cover));
+  const shouldUpdateCover =
+    !!cover &&
+    (!existingManga?.cover ||
+      existingManga.cover.includes("-ep") ||
+      existingManga.cover.includes("-ตอนที่-") ||
+      (isPosterCover && existingManga.cover !== cover));
+
+  const meta = {
+    genres: page.genres,
+    type: page.type,
+    status: page.status,
+    author: page.author,
+    artist: page.artist,
+  };
 
   let mangaRecord = existingManga;
   if (!mangaRecord) {
@@ -206,29 +77,37 @@ export async function syncMangaFromUrl(
         slug,
         title,
         thaiTitle: title,
-        cover: cover || "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=600",
+        cover: cover || PLACEHOLDER_COVER,
         banner: cover || null,
-        synopsis,
-        status: "Ongoing",
-        type: "MANHWA",
-        isColor: true,
-        genres: "Action,Fantasy,พระเอกเทพ",
-        latestChapter: latestWebChapter,
+        synopsis: synopsis || null,
+        latestChapter: latestWebChapter || 1,
+        ...newMangaDefaults(meta),
       },
     });
-  } else if (shouldUpdateCover && mangaRecord) {
-    mangaRecord = await prisma.manga.update({
-      where: { id: mangaRecord.id },
-      data: {
-        cover,
-        banner: cover,
-        synopsis: (synopsis && synopsis !== "ไม่มีเรื่องย่อ") ? synopsis : undefined,
-      },
-    });
+  } else {
+    // Fill in real metadata whenever the source page provides it
+    const metaUpdate = scrapedMetaUpdate(meta);
+    const hasMeta = Object.values(metaUpdate).some((v) => v !== undefined);
+    if (shouldUpdateCover || hasMeta) {
+      mangaRecord = await prisma.manga.update({
+        where: { id: mangaRecord.id },
+        data: {
+          ...(shouldUpdateCover
+            ? {
+                cover,
+                banner: cover,
+                synopsis: synopsis && synopsis !== "ไม่มีเรื่องย่อ" ? synopsis : undefined,
+              }
+            : {}),
+          ...metaUpdate,
+          // keep sort position stable: Prisma's @updatedAt would otherwise bump it
+          updatedAt: mangaRecord.updatedAt,
+        },
+      });
+    }
   }
 
-  // 3. SMART INCREMENTAL DEDUPLICATION
-  // Find all chapters in DB for this manga that ALREADY have pages
+  // 4. Incremental dedup: chapters that already have pages are skipped
   const existingDbChapters = await prisma.chapter.findMany({
     where: { mangaId: mangaRecord.id },
     select: { number: true, pages: true },
@@ -238,16 +117,13 @@ export async function syncMangaFromUrl(
   for (const c of existingDbChapters) {
     try {
       const p = JSON.parse(c.pages || "[]");
-      if (Array.isArray(p) && p.length > 0) {
-        completedChapterSet.add(c.number);
-      }
+      if (Array.isArray(p) && p.length > 0) completedChapterSet.add(c.number);
     } catch {}
   }
 
-  // Filter ONLY missing or new chapters!
   const missingChapters = webChapters
     .filter((ch) => !completedChapterSet.has(ch.number))
-    .sort((a, b) => a.number - b.number); // Scrape oldest missing first
+    .sort((a, b) => a.number - b.number); // oldest missing first
 
   const chaptersToDownload = options?.maxNewChapters
     ? missingChapters.slice(0, options.maxNewChapters)
@@ -255,21 +131,16 @@ export async function syncMangaFromUrl(
 
   const downloadedChapters: number[] = [];
 
-  // 4. Download only new/missing chapters
+  // 5. Download only new/missing chapters, within the time budget
   for (const ch of chaptersToDownload) {
-    if (options?.startTime && Date.now() - options.startTime > (options.maxDurationMs || 25000)) {
+    if (options?.startTime && Date.now() - options.startTime > (options.maxDurationMs || SYNC_TIME_BUDGET_MS)) {
       break;
     }
     try {
       const pages = await scrapeChapterImages(ch.url);
       if (pages.length > 0) {
         await prisma.chapter.upsert({
-          where: {
-            mangaId_number: {
-              mangaId: mangaRecord.id,
-              number: ch.number,
-            },
-          },
+          where: { mangaId_number: { mangaId: mangaRecord.id, number: ch.number } },
           create: {
             number: ch.number,
             title: ch.title,
@@ -288,11 +159,10 @@ export async function syncMangaFromUrl(
     } catch (err) {
       console.error(`Failed to scrape chapter ${ch.number}:`, err);
     }
-    // Small delay between chapters
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 300)); // be polite to the source site
   }
 
-  // If new chapters were downloaded or forceBump requested, refresh manga updatedAt so it bumps to the top-left!
+  // New chapters (or explicit request) bump the manga to the top of the home page
   if (downloadedChapters.length > 0 || options?.forceBump) {
     await prisma.manga.update({
       where: { id: mangaRecord.id },
@@ -303,15 +173,15 @@ export async function syncMangaFromUrl(
     });
     try {
       revalidatePath("/");
+      revalidatePath(`/manga/${slug}`);
     } catch {}
   }
 
-  // Count current chapters in DB with downloaded images
-  const totalDbChapters = completedChapterSet.size + downloadedChapters.length;
   const allDbChapterNumbers = Array.from(completedChapterSet).concat(downloadedChapters);
   const latestDbChapterNumber = allDbChapterNumbers.length > 0 ? Math.max(...allDbChapterNumbers) : 0;
 
-  // 5. Update or Upsert WatchedManga Record
+  // 6. Update watchlist entry. If chapters are missing but none could be downloaded,
+  // leave lastSyncedAt untouched so this manga stays at the front of the rotation.
   const hasUnresolvedChapters = missingChapters.length > 0 && downloadedChapters.length === 0;
 
   await prisma.watchedManga.upsert({
@@ -327,6 +197,7 @@ export async function syncMangaFromUrl(
       lastSyncedAt: hasUnresolvedChapters ? undefined : new Date(),
     },
     update: {
+      slug,
       title,
       cover: cover || undefined,
       latestChapterOnWeb: latestWebChapter,
@@ -343,36 +214,31 @@ export async function syncMangaFromUrl(
     skippedExistingChapters: completedChapterSet.size,
     newChaptersDownloaded: downloadedChapters.length,
     downloadedChapterNumbers: downloadedChapters,
+    remainingMissingChapters: missingChapters.length - downloadedChapters.length,
     latestChapterOnWeb: latestWebChapter,
   };
 }
 
-// Sync active watched mangas in the watchlist with safe time budget
+// Sync the active watchlist (oldest-synced first) within a fixed time budget
 export async function syncAllWatchedMangas(options?: { maxNewChapters?: number; limit?: number }) {
   const startTime = Date.now();
-  const TIME_BUDGET_MS = 25000; // Allow sufficient time for scraping new chapters within 60s maxDuration
-  const maxChapters = typeof options?.maxNewChapters === "number" ? options.maxNewChapters : 2;
-  const limit = options?.limit !== undefined ? options.limit : 2; // Process 1-2 mangas per run
+  const maxChapters = typeof options?.maxNewChapters === "number" ? options.maxNewChapters : SYNC_MAX_NEW_CHAPTERS;
+  const limit = options?.limit !== undefined ? options.limit : SYNC_BATCH_SIZE; // 0 = all
 
   const watchlist = await prisma.watchedManga.findMany({
     where: { status: "active" },
-    orderBy: [
-      { lastSyncedAt: { sort: "asc", nulls: "first" } },
-      { updatedAt: "asc" },
-    ],
+    orderBy: [{ lastSyncedAt: { sort: "asc", nulls: "first" } }, { updatedAt: "asc" }],
     take: limit > 0 ? limit : undefined,
   });
 
   const results: any[] = [];
   for (const item of watchlist) {
-    if (Date.now() - startTime > TIME_BUDGET_MS) {
-      break;
-    }
+    if (Date.now() - startTime > SYNC_TIME_BUDGET_MS) break;
     try {
       const res = await syncMangaFromUrl(item.url, {
         maxNewChapters: maxChapters,
         startTime,
-        maxDurationMs: TIME_BUDGET_MS,
+        maxDurationMs: SYNC_TIME_BUDGET_MS,
       });
       results.push({ url: item.url, success: true, ...res });
     } catch (err: any) {
@@ -385,4 +251,31 @@ export async function syncAllWatchedMangas(options?: { maxNewChapters?: number; 
   }
 
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// Run lock: prevents two sync runs (e.g. pg_cron tick + manual button) from
+// scraping the same chapters at the same time. Stored in SystemSetting.
+// A lock older than LOCK_TTL is considered stale (crashed/timed-out run).
+// ---------------------------------------------------------------------------
+const LOCK_KEY = "sync_run_lock";
+const LOCK_TTL_MS = 90_000;
+
+export async function acquireSyncLock(): Promise<string | null> {
+  const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const staleBefore = new Date(Date.now() - LOCK_TTL_MS);
+  // Atomic: insert, or take over only if the existing lock is stale
+  const rows = await prisma.$queryRaw<{ key: string }[]>`
+    INSERT INTO "SystemSetting" ("key", "value", "updatedAt")
+    VALUES (${LOCK_KEY}, ${token}, NOW())
+    ON CONFLICT ("key") DO UPDATE
+      SET "value" = EXCLUDED."value", "updatedAt" = NOW()
+      WHERE "SystemSetting"."updatedAt" < ${staleBefore}
+    RETURNING "key"
+  `;
+  return rows.length > 0 ? token : null;
+}
+
+export async function releaseSyncLock(token: string) {
+  await prisma.systemSetting.deleteMany({ where: { key: LOCK_KEY, value: token } });
 }

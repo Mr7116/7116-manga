@@ -144,20 +144,26 @@ export default async function MangaDetailPage({ params }: PageProps) {
 
                 {/* Rating & Stats Bar */}
                 <div className="flex flex-wrap items-center gap-4 rounded-lg border border-zinc-800 bg-[#16181d] p-3 text-xs">
-                  <div className="flex items-center gap-2">
-                    <Star className="h-4 w-4 fill-[#f59e0b] text-[#f59e0b]" />
-                    <span className="text-sm font-bold text-[#f59e0b]">{manga.rating}</span>
-                    <span className="text-zinc-500">/ 10</span>
-                  </div>
+                  {manga.rating > 0 && (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <Star className="h-4 w-4 fill-[#f59e0b] text-[#f59e0b]" />
+                        <span className="text-sm font-bold text-[#f59e0b]">{manga.rating}</span>
+                        <span className="text-zinc-500">/ 10</span>
+                      </div>
+                      <div className="h-3.5 w-px bg-zinc-800" />
+                    </>
+                  )}
 
-                  <div className="h-3.5 w-px bg-zinc-800" />
-
-                  <div className="flex items-center gap-1.5 text-zinc-300">
-                    <Eye className="h-3.5 w-3.5 text-zinc-400" />
-                    <span>{manga.views} วิว</span>
-                  </div>
-
-                  <div className="h-3.5 w-px bg-zinc-800" />
+                  {manga.views && manga.views !== "0" && (
+                    <>
+                      <div className="flex items-center gap-1.5 text-zinc-300">
+                        <Eye className="h-3.5 w-3.5 text-zinc-400" />
+                        <span>{manga.views} วิว</span>
+                      </div>
+                      <div className="h-3.5 w-px bg-zinc-800" />
+                    </>
+                  )}
 
                   <div className="flex items-center gap-1.5 text-zinc-300">
                     <User className="h-3.5 w-3.5 text-zinc-400" />

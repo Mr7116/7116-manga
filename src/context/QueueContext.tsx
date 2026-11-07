@@ -201,6 +201,9 @@ export function QueueProvider({ children }: { children: React.ReactNode }) {
           body: JSON.stringify({ url: item.url }),
         });
 
+        if (scrapeRes.status === 401) {
+          throw new Error("เซสชันผู้ดูแลหมดอายุ กรุณาเข้าสู่ระบบใหม่ที่ /login");
+        }
         const scrapeData = await scrapeRes.json();
         if (!scrapeRes.ok || !scrapeData.success || !scrapeData.data) {
           throw new Error(scrapeData.error || "ดึงข้อมูลจากเว็บต้นทางไม่สำเร็จ");
@@ -243,6 +246,11 @@ export function QueueProvider({ children }: { children: React.ReactNode }) {
             synopsis: seriesData.synopsis,
             images: seriesData.images || [],
             chapters: seriesData.chapters || [],
+            genres: seriesData.genres,
+            type: seriesData.type,
+            status: seriesData.status,
+            author: seriesData.author,
+            artist: seriesData.artist,
           }),
         });
 
@@ -307,7 +315,12 @@ export function QueueProvider({ children }: { children: React.ReactNode }) {
 
         const chaptersToDownload = rawChapters.map((ch: any, idx: number) => {
           const match = ch.title?.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || ch.url?.match(/ตอนที่-(\d+(\.\d+)?)/i);
-          const num = match ? parseFloat(match[1]) : (typeof ch.chapterNumber === "number" ? ch.chapterNumber : idx + 1);
+          const num =
+            typeof ch.number === "number"
+              ? ch.number
+              : match
+                ? parseFloat(match[1])
+                : idx + 1;
           return {
             ...ch,
             chapterNumber: num,

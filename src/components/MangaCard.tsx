@@ -109,7 +109,8 @@ export default function MangaCard({ manga, isFirst }: MangaCardProps) {
           })}
         </div>
 
-        {/* 5-Star Rating + Score */}
+        {/* 5-Star Rating + Score (hidden until a real rating exists) */}
+        {manga.rating > 0 && (
         <div className="flex items-center gap-1.5 text-[11px] pt-0.5">
           <div className="flex items-center text-[#f59e0b]">
             {[1, 2, 3, 4, 5].map((star) => (
@@ -127,6 +128,7 @@ export default function MangaCard({ manga, isFirst }: MangaCardProps) {
             {manga.rating.toFixed(1)}
           </span>
         </div>
+        )}
       </div>
     </div>
   );

@@ -35,9 +35,15 @@ interface ScrapeResult {
   cover?: string;
   synopsis?: string;
   totalChaptersFound?: number;
-  chapters?: { title: string; url: string }[];
+  chapters?: { title: string; url: string; number?: number | null; releaseDate?: string }[];
   totalImagesFound?: number;
   images?: string[];
+  chapterNumber?: number | null;
+  genres?: string[];
+  type?: string;
+  status?: string;
+  author?: string;
+  artist?: string;
   nextUrl?: string;
   prevUrl?: string;
 }
@@ -156,6 +162,12 @@ export default function ImportPage() {
           synopsis: result.synopsis,
           images: result.images || [],
           chapters: result.chapters || [],
+          chapterNumber: typeof result.chapterNumber === "number" ? result.chapterNumber : undefined,
+          genres: result.genres,
+          type: result.type,
+          status: result.status,
+          author: result.author,
+          artist: result.artist,
         }),
       });
 
@@ -203,6 +215,11 @@ export default function ImportPage() {
           cover: result.cover,
           synopsis: result.synopsis,
           chapters: result.chapters,
+          genres: result.genres,
+          type: result.type,
+          status: result.status,
+          author: result.author,
+          artist: result.artist,
         }),
       });
 

@@ -163,7 +163,8 @@ export default function WatchlistPage() {
     };
   }, []);
 
-  // Auto-Scheduler Timer Effect
+  // Countdown display only. The actual sync runs on the server (pg_cron / cron-job.org
+  // hits /api/cron/sync every 2 minutes), so closing this page does not stop it.
   useEffect(() => {
     if (!autoScheduleActive) {
       setSecondsRemaining(intervalMinutes * 60);
@@ -173,32 +174,21 @@ export default function WatchlistPage() {
     const timer = setInterval(() => {
       if (nextSyncAt) {
         const diffSec = Math.round((new Date(nextSyncAt).getTime() - Date.now()) / 1000);
-        if (diffSec <= 0) {
-          setSecondsRemaining(0);
-          triggerAutoSync();
-        } else {
-          setSecondsRemaining(diffSec);
-        }
-      } else {
-        setSecondsRemaining((prev) => {
-          if (prev <= 1) {
-            triggerAutoSync();
-            return intervalMinutes * 60;
-          }
-          return prev - 1;
-        });
+        setSecondsRemaining(Math.max(0, diffSec));
       }
     }, 1000);
 
     return () => clearInterval(timer);
   }, [autoScheduleActive, intervalMinutes, nextSyncAt]);
 
-  // Trigger sync all
-  const triggerAutoSync = async () => {
-    addLog(`⏰ [Scheduler] เริ่มต้นรอบการซิงค์อัตโนมัติตามกำหนดเวลา...`, "info");
-    await handleSyncAll();
-    await fetchSchedulerConfig();
-  };
+  // While the page is open, refresh status from the server every 30s to show background results
+  useEffect(() => {
+    const poll = setInterval(() => {
+      fetchWatchlist();
+      fetchSchedulerConfig();
+    }, 30_000);
+    return () => clearInterval(poll);
+  }, []);
 
   // Toggle scheduler on/off (persisted in DB)
   const handleToggleScheduler = async () => {
@@ -339,7 +329,9 @@ export default function WatchlistPage() {
         throw new Error("เซิร์ฟเวอร์ตอบกลับไม่ถูกต้องหรือหมดเวลาประมวลผล (Timeout)");
       }
 
-      if (data.success && data.data) {
+      if (data.type === "skipped") {
+        addLog(`⏳ [${item.title}] ระบบกำลังซิงค์รอบอื่นอยู่ ลองใหม่อีกครั้งในไม่กี่วินาที`, "warn");
+      } else if (data.success && data.data) {
         const r = data.data;
         addLog(
           `✅ ซิงค์สำเร็จ [${r.title}]: ข้ามตอนเดิม ${r.skippedExistingChapters} ตอน | โหลดตอนใหม่ ${r.newChaptersDownloaded} ตอน (ตอนล่าสุดเว็บ: ${r.latestChapterOnWeb})`,
@@ -363,7 +355,11 @@ export default function WatchlistPage() {
     addLog(`⚡ เริ่มต้นการซิงค์ทุกเรื่องในรายการติดตาม...`, "info");
 
     try {
-      const res = await fetch("/api/cron/sync", { method: "POST" });
+      const res = await fetch("/api/cron/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: true }),
+      });
       const text = await res.text();
       let data: any;
       try {
@@ -372,7 +368,9 @@ export default function WatchlistPage() {
         throw new Error("เซิร์ฟเวอร์ตอบกลับไม่ถูกต้องหรือหมดเวลาประมวลผล (Timeout)");
       }
 
-      if (data.success && Array.isArray(data.data)) {
+      if (data.type === "skipped") {
+        addLog(`⏳ ระบบหลังบ้านกำลังซิงค์อยู่แล้ว ผลลัพธ์จะแสดงเมื่อรอบนั้นเสร็จ`, "warn");
+      } else if (data.success && Array.isArray(data.data)) {
         let totalDownloaded = 0;
         let totalSkipped = 0;
 
@@ -486,6 +484,10 @@ export default function WatchlistPage() {
               </Link>
               <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />
               <span className="text-[#46e39a] font-bold">ระบบตั้งเวลาซิงค์</span>
+              <span className="text-zinc-700 mx-1">|</span>
+              <a href="/api/auth/logout" className="hover:text-rose-300 transition-colors">
+                ออกจากระบบ
+              </a>
             </nav>
           </div>
 
@@ -597,8 +599,10 @@ export default function WatchlistPage() {
               </div>
               <p className="text-xs text-zinc-400 mt-0.5">
                 {autoScheduleActive
-                  ? `รอบถัดไปในอีก: ${formatTimeRemaining(secondsRemaining)} (จะเปิดค้างไว้ตลอดไปจนกว่าคุณจะกดปิดเอง)`
-                  : "กดเริ่มทำงานเพื่อให้ระบบซิงค์ตอนใหม่อัตโนมัติตามช่วงเวลา"}
+                  ? secondsRemaining > 0
+                    ? `รอบถัดไปในอีก: ${formatTimeRemaining(secondsRemaining)} (ทำงานบนเซิร์ฟเวอร์ ปิดหน้าเว็บได้)`
+                    : "ถึงรอบแล้ว รอเซิร์ฟเวอร์เริ่มซิงค์ (ภายใน 2 นาที)"
+                  : "กดเริ่มทำงานเพื่อให้เซิร์ฟเวอร์ซิงค์ตอนใหม่อัตโนมัติ แม้ปิดหน้าเว็บไปแล้ว"}
               </p>
             </div>
           </div>
@@ -864,19 +868,20 @@ export default function WatchlistPage() {
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-zinc-400 mt-3">
             <div className="p-4 rounded-xl bg-[#111317] border border-zinc-800 space-y-2">
-              <span className="font-bold text-emerald-400">1. ตั้งเวลาผ่านหน้าเว็บ (In-Browser Scheduler)</span>
+              <span className="font-bold text-emerald-400">1. ทำงานบนเซิร์ฟเวอร์ ไม่ต้องเปิดหน้าเว็บ</span>
               <p>
-                เปิดหน้านี้ทิ้งไว้ในเบราว์เซอร์แล้วกด <b>"เริ่มตั้งเวลาอัตโนมัติ"</b> ระบบจะนับถอยหลังและเรียกซิงค์ตอนใหม่อัตโนมัติตามช่วงเวลาที่คุณเลือก (10 นาที, 30 นาที, 1 ชม. ฯลฯ)
+                Supabase pg_cron (หรือ cron-job.org) เรียก <code className="text-emerald-300">/api/cron/sync</code> ทุก 2 นาที
+                เซิร์ฟเวอร์จะซิงค์เมื่อสวิตช์ด้านบนเปิดอยู่และถึงรอบตามความถี่ที่เลือก ปิดเบราว์เซอร์หรือปิดคอมได้เลย
               </p>
             </div>
             <div className="p-4 rounded-xl bg-[#111317] border border-zinc-800 space-y-2">
-              <span className="font-bold text-emerald-400">2. ตั้งเวลาผ่าน API / Cron Job / Windows Task Scheduler</span>
+              <span className="font-bold text-emerald-400">2. เรียกเองผ่าน API (ต้องใช้ CRON_SECRET)</span>
               <p>
-                สามารถตั้งให้รันคำสั่งเบื้องหลังได้ตลอด 24 ชม. โดยเรียก Endpoint:
-                <br />
-                <code className="mt-1 inline-block bg-black/50 text-emerald-300 px-2 py-1 rounded">
-                  curl http://localhost:3000/api/cron/sync
+                <code className="mt-1 inline-block bg-black/50 text-emerald-300 px-2 py-1 rounded break-all">
+                  curl -H &quot;Authorization: Bearer $CRON_SECRET&quot; https://your-app/api/cron/sync
                 </code>
+                <br />
+                ตั้งค่าครั้งแรกด้วย <code className="text-emerald-300">npm run cron:setup</code> (ดู README)
               </p>
             </div>
           </div>

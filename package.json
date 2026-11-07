@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "postinstall": "prisma generate",
-    "sync:daemon": "node scripts/sync-daemon.mjs"
+    "sync:daemon": "node scripts/sync-daemon.mjs",
+    "cron:setup": "node scripts/setup-supabase-cron.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@prisma/client": "6.4.1",

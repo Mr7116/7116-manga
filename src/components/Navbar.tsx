@@ -177,8 +177,12 @@ export default function Navbar() {
                             {manga.title}
                           </div>
                           <div className="flex items-center gap-2 text-[10px] text-zinc-400">
-                            <span className="text-amber-400 font-bold">★ {manga.rating}</span>
-                            <span>•</span>
+                            {manga.rating > 0 && (
+                              <>
+                                <span className="text-amber-400 font-bold">★ {manga.rating}</span>
+                                <span>•</span>
+                              </>
+                            )}
                             <span>ตอนที่ {manga.latestChapter}</span>
                           </div>
                         </div>

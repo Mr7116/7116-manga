@@ -1,84 +1,65 @@
 /**
- * Manga Auto-Sync Daemon
+ * Local Auto-Sync Ticker (optional)
  * ----------------------------------------------------
- * Runs in the background and periodically triggers /api/cron/sync
- * Respects the persistent scheduler state in the database.
- * 
- * Usage: node scripts/sync-daemon.mjs
- * Or: npm run sync:daemon
+ * Calls /api/cron/sync every 2 minutes — the same thing Supabase pg_cron does.
+ * Only needed if you can't use pg_cron / cron-job.org (e.g. running fully locally).
+ * The server decides whether a sync is actually due (on/off + interval set on /watchlist).
+ *
+ * Usage:  npm run sync:daemon
+ * Env:    APP_URL (default http://localhost:3000), CRON_SECRET (required)
  */
 
-const BASE_URL = process.env.APP_URL || "http://localhost:3000";
+// Load .env if present (Node >= 20.12)
+try {
+  process.loadEnvFile();
+} catch {}
+
+const BASE_URL = (process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
+const CRON_SECRET = process.env.CRON_SECRET;
+const TICK_MS = 2 * 60 * 1000;
+
+if (!CRON_SECRET) {
+  console.error("❌ CRON_SECRET is not set. Add it to .env (same value as on the server).");
+  process.exit(1);
+}
 
 console.log("==================================================");
-console.log("  MANGA AUTO-SYNC BACKGROUND DAEMON");
-console.log(`  Target: ${BASE_URL}/api/cron/sync`);
-console.log("  Syncing with persistent database scheduler state...");
+console.log("  MANGA AUTO-SYNC TICKER");
+console.log(`  Target: ${BASE_URL}/api/cron/sync  (every 2 minutes)`);
 console.log("==================================================");
 
-let nextTimer = null;
-
-async function checkAndRun() {
-  const timestamp = new Date().toLocaleString("th-TH");
-
+async function tick() {
+  const ts = new Date().toLocaleString("th-TH");
   try {
-    // 1. Fetch current scheduler status from DB
-    const schedRes = await fetch(`${BASE_URL}/api/scheduler`);
-    if (!schedRes.ok) {
-      console.error(`[${timestamp}] ⚠️ Could not fetch scheduler config (status ${schedRes.status})`);
-      scheduleNext(30);
-      return;
-    }
-
-    const schedJson = await schedRes.json();
-    const config = schedJson.data || {};
-
-    if (!config.enabled) {
-      console.log(`[${timestamp}] ⏸️ Scheduler is currently OFF in system settings. Standing by (checking in 1 min)...`);
-      scheduleNext(1);
-      return;
-    }
-
-    const intervalMin = config.intervalMinutes || 30;
-    console.log(`\n[${timestamp}] ⚡ Scheduler is ACTIVE (Every ${intervalMin} mins). Triggering manga sync...`);
-
-    // 2. Trigger sync
     const res = await fetch(`${BASE_URL}/api/cron/sync`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${CRON_SECRET}`,
+      },
     });
+    const data = await res.json().catch(() => ({}));
 
-    if (!res.ok) {
-      console.error(`[${timestamp}] ❌ Sync failed with status: ${res.status}`);
-      scheduleNext(intervalMin);
-      return;
-    }
-
-    const data = await res.json();
-    if (data.success && Array.isArray(data.data)) {
-      console.log(`[${timestamp}] ✅ Sync finished! Total mangas checked: ${data.data.length}`);
+    if (res.status === 401) {
+      console.error(`[${ts}] ❌ Unauthorized — CRON_SECRET doesn't match the server`);
+    } else if (data.type === "skipped") {
+      console.log(`[${ts}] ⏸️  skipped (${data.reason})`);
+    } else if (data.success && Array.isArray(data.data)) {
+      console.log(`[${ts}] ✅ synced ${data.data.length} manga in ${data.durationMs}ms`);
       for (const item of data.data) {
-        if (item.success) {
-          console.log(
-            `   - [${item.title}]: Skipped existing: ${item.skippedExistingChapters || 0} | Downloaded new: ${item.newChaptersDownloaded || 0}`
-          );
-        } else {
-          console.log(`   - [${item.title}]: Error: ${item.error}`);
-        }
+        console.log(
+          item.success
+            ? `   - [${item.title}] existing: ${item.skippedExistingChapters || 0} | new: ${item.newChaptersDownloaded || 0}`
+            : `   - [${item.title}] error: ${item.error}`
+        );
       }
+    } else {
+      console.error(`[${ts}] ❌ sync failed (${res.status}): ${data.error || "unknown error"}`);
     }
-
-    scheduleNext(intervalMin);
   } catch (err) {
-    console.error(`[${timestamp}] ❌ Connection error:`, err.message);
-    scheduleNext(1);
+    console.error(`[${ts}] ❌ connection error: ${err.message}`);
   }
 }
 
-function scheduleNext(minutes) {
-  if (nextTimer) clearTimeout(nextTimer);
-  nextTimer = setTimeout(checkAndRun, minutes * 60 * 1000);
-}
-
-// Start immediately
-checkAndRun();
+tick();
+setInterval(tick, TICK_MS);

@@ -1,39 +1,43 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { normalizeThaiUrl, syncMangaFromUrl } from "@/lib/syncService";
-import { slugify } from "@/lib/mangaService";
+import { slugFromUrl } from "@/lib/slug";
+import { requireAuth } from "@/lib/auth";
 
 export const maxDuration = 60;
 
 // GET /api/watchlist - List all watched mangas
-export async function GET() {
+export async function GET(request: Request) {
+  const denied = requireAuth(request);
+  if (denied) return denied;
+
   try {
     const list = await prisma.watchedManga.findMany({
       orderBy: { updatedAt: "desc" },
     });
 
-    // Also get real-time chapter count and latest chapter in DB for each watched manga
-    const enrichedList = await Promise.all(
-      list.map(async (item) => {
-        const manga = await prisma.manga.findUnique({
-          where: { slug: item.slug },
+    // One query for all related manga (was one query per watched item)
+    const slugs = Array.from(new Set(list.map((i) => i.slug).filter(Boolean)));
+    const mangas = slugs.length
+      ? await prisma.manga.findMany({
+          where: { slug: { in: slugs } },
           select: {
-            id: true,
+            slug: true,
             latestChapter: true,
             _count: { select: { chapters: true } },
           },
-        });
+        })
+      : [];
+    const bySlug = new Map(mangas.map((m) => [m.slug, m]));
 
-        const totalChaptersInDb = manga?._count?.chapters || 0;
-        const latestChapterInDb = manga?.latestChapter || item.latestChapterInDb || 0;
-
-        return {
-          ...item,
-          totalChaptersInDb,
-          latestChapterInDb,
-        };
-      })
-    );
+    const enrichedList = list.map((item) => {
+      const manga = bySlug.get(item.slug);
+      return {
+        ...item,
+        totalChaptersInDb: manga?._count?.chapters || 0,
+        latestChapterInDb: manga?.latestChapter || item.latestChapterInDb || 0,
+      };
+    });
 
     return NextResponse.json({
       success: true,
@@ -49,6 +53,9 @@ export async function GET() {
 
 // POST /api/watchlist - Add a URL or list of URLs to watchlist
 export async function POST(request: Request) {
+  const denied = requireAuth(request);
+  if (denied) return denied;
+
   try {
     const body = await request.json();
 
@@ -72,14 +79,7 @@ export async function POST(request: Request) {
       const createdItems = [];
       for (const raw of validUrls) {
         const safeUrl = normalizeThaiUrl(raw);
-        let slug = "";
-        try {
-          const urlObj = new URL(safeUrl);
-          const parts = urlObj.pathname.split("/").filter(Boolean);
-          if (parts.length > 0) {
-            slug = slugify(decodeURIComponent(parts[0]).replace(/[-_](?:ตอนที่|ตอน|chapter|ch|ep)[-_]?\d+.*$/i, ""));
-          }
-        } catch {}
+        const slug = slugFromUrl(safeUrl);
 
         const item = await prisma.watchedManga.upsert({
           where: { url: safeUrl },
@@ -175,11 +175,14 @@ export async function POST(request: Request) {
 
 // PATCH /api/watchlist - Update status (active / paused)
 export async function PATCH(request: Request) {
+  const denied = requireAuth(request);
+  if (denied) return denied;
+
   try {
     const body = await request.json();
     const { id, status } = body;
 
-    if (!id || !status) {
+    if (!id || !["active", "paused"].includes(status)) {
       return NextResponse.json(
         { success: false, error: "Missing id or status" },
         { status: 400 }
@@ -205,6 +208,9 @@ export async function PATCH(request: Request) {
 
 // DELETE /api/watchlist - Delete from watchlist
 export async function DELETE(request: Request) {
+  const denied = requireAuth(request);
+  if (denied) return denied;
+
   try {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");

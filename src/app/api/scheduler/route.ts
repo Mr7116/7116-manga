@@ -1,10 +1,14 @@
 import { NextResponse } from "next/server";
 import { getSchedulerConfig, updateSchedulerConfig } from "@/lib/schedulerService";
+import { requireAuth } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 // GET /api/scheduler - Get current scheduler status and settings
-export async function GET() {
+export async function GET(request: Request) {
+  const denied = requireAuth(request);
+  if (denied) return denied;
+
   try {
     const config = await getSchedulerConfig();
     return NextResponse.json({
@@ -21,6 +25,9 @@ export async function GET() {
 
 // POST /api/scheduler - Update scheduler status (enable/disable, change interval)
 export async function POST(request: Request) {
+  const denied = requireAuth(request);
+  if (denied) return denied;
+
   try {
     const body = await request.json();
     const { enabled, intervalMinutes } = body;

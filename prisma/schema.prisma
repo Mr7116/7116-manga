@@ -20,10 +20,10 @@ model Manga {
   status        String    @default("Ongoing") // "Ongoing" | "Completed"
   type          String    @default("MANHWA")  // "MANHWA" | "MANHUA" | "MANGA"
   isColor       Boolean   @default(true)
-  genres        String    @default("Action,Fantasy") // Comma-separated or JSON string
-  rating        Float     @default(8.0)
-  ratingCount   Int       @default(100)
-  views         String    @default("1.0K")
+  genres        String    @default("") // Comma-separated, scraped from source
+  rating        Float     @default(0)  // 0 = no rating yet (hidden in UI)
+  ratingCount   Int       @default(0)
+  views         String    @default("0")
   author        String    @default("Unknown")
   artist        String    @default("Unknown")
   latestChapter Float     @default(1)

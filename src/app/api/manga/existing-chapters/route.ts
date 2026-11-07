@@ -1,27 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { slugify, findMatchingMangaSlug } from "@/lib/mangaService";
+import { findMatchingMangaSlug } from "@/lib/mangaService";
+import { slugFromUrl } from "@/lib/slug";
+import { requireAuth } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
+  const denied = requireAuth(req);
+  if (denied) return denied;
+
   try {
     const { searchParams } = new URL(req.url);
     let slug = searchParams.get("slug") || "";
     const url = searchParams.get("url") || "";
     const title = searchParams.get("title") || "";
 
-    if (!slug && url) {
-      try {
-        const urlObj = new URL(url);
-        const pathParts = urlObj.pathname.split("/").filter(Boolean);
-        if (pathParts.length > 0) {
-          let candidate = decodeURIComponent(pathParts[0]);
-          candidate = candidate.replace(/[-_](?:ตอนที่|ตอน|chapter|ch|ep)[-_]?\d+.*$/i, "");
-          slug = slugify(candidate);
-        }
-      } catch {}
-    }
+    if (!slug && url) slug = slugFromUrl(url);
 
     if (!slug) {
       return NextResponse.json({ success: true, existingNumbers: [], total: 0 });

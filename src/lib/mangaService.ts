@@ -1,6 +1,10 @@
 import { cache } from "react";
 import { prisma } from "./prisma";
 import { seedDatabaseIfEmpty } from "./seed";
+import { slugify, slugFromUrl } from "./slug";
+import { cleanSeriesTitle, isChapterUrl, parseChapterNumber } from "./scraper";
+
+export { slugify };
 
 export interface CleanManga {
   id: string;
@@ -95,12 +99,18 @@ export function parseThaiDateToTimestamp(text?: string | null): number {
     return new Date(year, month, day, 12, 0, 0).getTime();
   }
 
-  // Format 3: Short date without year e.g. "6 พ.ย." or "29 ต.ค." -> defaults to current year (2026)
+  // Format 3: Short date without year e.g. "6 พ.ย." or "29 ต.ค." -> assume the most recent such date
+  // (current year, or last year if that would be in the future — e.g. "29 ธ.ค." read in January)
   const m3 = str.match(new RegExp(`^(\\d{1,2})\\s*(${monthNames})$`, "i"));
   if (m3) {
     const day = parseInt(m3[1], 10);
     const month = THAI_MONTH_INDEX[m3[2].toLowerCase()];
-    return new Date(2026, month, day, 12, 0, 0).getTime();
+    const year = new Date(now).getFullYear();
+    let ts = new Date(year, month, day, 12, 0, 0).getTime();
+    if (ts > now + 24 * 60 * 60 * 1000) {
+      ts = new Date(year - 1, month, day, 12, 0, 0).getTime();
+    }
+    return ts;
   }
 
   return 0;
@@ -145,10 +155,11 @@ function formatManga(m: any): CleanManga {
     status: (m.status as "Ongoing" | "Completed") || "Ongoing",
     type: (m.type as "MANHWA" | "MANHUA" | "MANGA") || "MANHWA",
     isColor: m.isColor ?? true,
-    genres: m.genres ? m.genres.split(",").map((g: string) => g.trim()) : [],
-    rating: m.rating || 8.0,
-    ratingCount: m.ratingCount || 100,
-    views: m.views || "1.0K",
+    genres: m.genres ? m.genres.split(",").map((g: string) => g.trim()).filter(Boolean) : [],
+    // 0 / "0" means "no real data yet" — the UI hides these values
+    rating: m.rating ?? 0,
+    ratingCount: m.ratingCount ?? 0,
+    views: m.views || "0",
     author: m.author || "Unknown",
     artist: m.artist || "Unknown",
     latestChapter: m.latestChapter || (chapters[0]?.number ?? 1),
@@ -174,7 +185,8 @@ export function normalizeMangaTitle(t: string): string {
     .trim();
 }
 
-// Find existing manga by matching candidate slug or normalized titles
+// Find existing manga by candidate slug, or by an EXACT normalized-title match.
+// (Substring matching was removed: short titles like "Mage" used to swallow unrelated series.)
 export async function findMatchingMangaSlug(candidateSlug: string, title?: string): Promise<string> {
   if (candidateSlug) {
     const direct = await prisma.manga.findUnique({
@@ -187,35 +199,23 @@ export async function findMatchingMangaSlug(candidateSlug: string, title?: strin
   if (!title) return candidateSlug;
 
   const nTitle = normalizeMangaTitle(title);
-  if (!nTitle) return candidateSlug;
+  // Very short normalized titles are too ambiguous to merge on
+  if (!nTitle || nTitle.length < 4) return candidateSlug;
 
   const all = await prisma.manga.findMany({
     select: { slug: true, title: true, thaiTitle: true },
   });
 
   for (const m of all) {
-    const n1 = normalizeMangaTitle(m.title);
-    const n2 = normalizeMangaTitle(m.thaiTitle || "");
     if (
-      (n1 && (nTitle === n1 || nTitle.includes(n1) || n1.includes(nTitle))) ||
-      (n2 && (nTitle.includes(n2) || n2.includes(nTitle)))
+      normalizeMangaTitle(m.title) === nTitle ||
+      (m.thaiTitle && normalizeMangaTitle(m.thaiTitle) === nTitle)
     ) {
       return m.slug;
     }
   }
 
   return candidateSlug;
-}
-
-// Helper to create slug from title or URL
-export function slugify(text: string): string {
-  return text
-    .toString()
-    .toLowerCase()
-    .trim()
-    .replace(/[^\w\s\u0E00-\u0E7F-]/g, "") // Keep alphanumeric and Thai
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-");
 }
 
 export async function getAllMangas(filter?: {
@@ -238,10 +238,11 @@ export async function getAllMangas(filter?: {
   }
 
   if (filter?.search && filter.search.trim()) {
+    const q = filter.search.trim();
     where.OR = [
-      { title: { contains: filter.search.trim() } },
-      { thaiTitle: { contains: filter.search.trim() } },
-      { genres: { contains: filter.search.trim() } },
+      { title: { contains: q, mode: "insensitive" } },
+      { thaiTitle: { contains: q, mode: "insensitive" } },
+      { genres: { contains: q, mode: "insensitive" } },
     ];
   }
 
@@ -357,6 +358,49 @@ export const getRelatedMangas = cache(async (excludeSlug: string, limit = 5): Pr
   return mangas.map(formatManga);
 });
 
+const PLACEHOLDER_COVER = "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=600";
+
+/**
+ * Field values for a brand-new Manga row. No invented ratings / views:
+ * rating 0 and views "0" mean "unknown" and are hidden by the UI.
+ */
+export function newMangaDefaults(meta: {
+  genres?: string[];
+  type?: string;
+  status?: string;
+  author?: string;
+  artist?: string;
+}) {
+  return {
+    status: meta.status === "Completed" ? "Completed" : "Ongoing",
+    type: meta.type === "MANHUA" || meta.type === "MANGA" ? meta.type : "MANHWA",
+    isColor: meta.type !== "MANGA",
+    genres: (meta.genres ?? []).join(","),
+    rating: 0,
+    ratingCount: 0,
+    views: "0",
+    author: meta.author || "Unknown",
+    artist: meta.artist || meta.author || "Unknown",
+  };
+}
+
+/** Metadata update for an existing Manga: only fill values we actually scraped. */
+export function scrapedMetaUpdate(meta: {
+  genres?: string[];
+  type?: string;
+  status?: string;
+  author?: string;
+  artist?: string;
+}) {
+  return {
+    genres: meta.genres && meta.genres.length > 0 ? meta.genres.join(",") : undefined,
+    type: meta.type || undefined,
+    status: meta.status || undefined,
+    author: meta.author || undefined,
+    artist: meta.artist || undefined,
+  };
+}
+
 // SAVE SCRAPED MANGA & CHAPTER TO DATABASE
 export async function saveScrapedManga(data: {
   url: string;
@@ -366,120 +410,72 @@ export async function saveScrapedManga(data: {
   cover?: string;
   synopsis?: string;
   images?: string[];
-  chapters?: { title: string; url: string }[];
+  chapters?: { title: string; url: string; number?: number | null }[];
   chapterNumber?: number;
   chapterTitle?: string;
+  genres?: string[];
+  type?: string;
+  status?: string;
+  author?: string;
+  artist?: string;
 }): Promise<{ manga: CleanManga; chapterNumber?: number }> {
   await seedDatabaseIfEmpty();
 
-  // Extract or generate slug from URL or title
-  let slug = data.slug || "";
-  if (!slug) {
-    try {
-      const target = data.seriesUrl || data.url;
-      const urlObj = new URL(target);
-      const pathParts = urlObj.pathname.split("/").filter(Boolean);
-      if (pathParts.length > 0) {
-        let candidate = decodeURIComponent(pathParts[0]);
-        // Remove chapter suffix from slug e.g. "third-rate-martial-family-ตอนที่-1" -> "third-rate-martial-family"
-        candidate = candidate
-          .replace(/[-_](?:ตอนที่|ตอน|chapter|ch|ep)[-_]?\d+.*$/i, "");
-        slug = slugify(candidate);
-      }
-    } catch {}
-  }
+  // Slug: explicit > derived from URL > derived from title
+  let slug = data.slug || slugFromUrl(data.seriesUrl || data.url);
+  if (!slug) slug = slugify(cleanSeriesTitle(data.title));
 
-  if (!slug) {
-    slug = slugify(data.title.replace(/ตอนที่\s*\d+.*/i, ""));
-  }
-
-  // Cross-source Smart Matching: if candidate slug doesn't exist, check if an existing manga matches by title
+  // Cross-source matching (exact normalized title) against existing manga
   slug = await findMatchingMangaSlug(slug, data.title);
 
-  // Determine chapter number if URL is a chapter page
-  let chapterNumber: number | null = null;
-  let chapterTitle = "ตอนที่ 1";
-
-  // Check explicit chapterNumber first
-  if (typeof data.chapterNumber === "number") {
-    chapterNumber = data.chapterNumber;
-    chapterTitle = data.chapterTitle || `ตอนที่ ${chapterNumber}`;
+  // Chapter number: explicit > URL > title
+  let chapterNumber: number | null =
+    typeof data.chapterNumber === "number" ? data.chapterNumber : null;
+  if (chapterNumber === null && isChapterUrl(data.url)) {
+    chapterNumber = parseChapterNumber(null, data.url);
   }
-
-  let decodedUrl = data.url;
-  try {
-    decodedUrl = decodeURIComponent(data.url);
-  } catch {}
-
   if (chapterNumber === null) {
-    const chMatch = decodedUrl.match(/ตอนที่-(\d+(\.\d+)?)|ตอนที่\s*(\d+(\.\d+)?)|chapter-(\d+(\.\d+)?)|ep-(\d+(\.\d+)?)/i);
-    if (chMatch) {
-      const numStr = chMatch[1] || chMatch[3] || chMatch[5] || chMatch[7];
-      if (numStr) {
-        chapterNumber = parseFloat(numStr);
-        chapterTitle = data.chapterTitle || `ตอนที่ ${chapterNumber}`;
-      }
-    }
+    chapterNumber = parseChapterNumber(data.title.match(/ตอนที่\s*\d+(?:\.\d+)?/i)?.[0] ?? null, null);
   }
+  const chapterTitle = data.chapterTitle || `ตอนที่ ${chapterNumber ?? 1}`;
 
-  // Also check title for chapter number if not in URL
-  if (chapterNumber === null) {
-    const titleMatch = data.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i);
-    if (titleMatch && titleMatch[1]) {
-      chapterNumber = parseFloat(titleMatch[1]);
-      chapterTitle = data.chapterTitle || `ตอนที่ ${chapterNumber}`;
-    }
-  }
+  const seriesTitle = cleanSeriesTitle(data.title) || data.title;
 
-  // Clean series title (remove "ตอนที่ XX", "| Go-Manga", etc.)
-  const cleanSeriesTitle = data.title
-    .replace(/ตอนที่\s*\d+.*$/i, "")
-    .replace(/\|\s*Go-Manga.*$/i, "")
-    .replace(/\|\s*.*$/, "")
-    .trim();
-
-  // Check existing manga record first to protect cover art from being overwritten by chapter pages
+  // Don't let a chapter page overwrite the real series poster
   const existingManga = await prisma.manga.findUnique({ where: { slug } });
+  const shouldUpdateCover = !existingManga?.cover || !isChapterUrl(data.url);
 
-  // Only update cover if manga doesn't have a cover yet, or if importing from series page
-  const isChapterUrl = /ตอนที่|chapter|ep-/i.test(data.url);
-  const shouldUpdateCover = !existingManga?.cover || !isChapterUrl;
+  const meta = {
+    genres: data.genres,
+    type: data.type,
+    status: data.status,
+    author: data.author,
+    artist: data.artist,
+  };
 
-  // Upsert Manga
   const mangaRecord = await prisma.manga.upsert({
     where: { slug },
     create: {
       slug,
-      title: cleanSeriesTitle || data.title,
-      thaiTitle: cleanSeriesTitle,
-      cover: data.cover || "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=600",
-      synopsis: data.synopsis || "มังงะนำเข้าจาก Go-Manga",
-      status: "Ongoing",
-      type: "MANHWA",
-      isColor: true,
-      genres: "Action,Fantasy,พระเอกเทพ",
-      rating: 8.5,
-      ratingCount: 150,
-      views: "1.2K",
-      author: "7116-Manga",
-      artist: "7116-Manga",
+      title: seriesTitle,
+      thaiTitle: seriesTitle,
+      cover: data.cover || PLACEHOLDER_COVER,
+      synopsis: data.synopsis || null,
       latestChapter: chapterNumber || 1,
+      ...newMangaDefaults(meta),
     },
     update: {
       cover: shouldUpdateCover && data.cover ? data.cover : undefined,
       synopsis: data.synopsis && data.synopsis !== "ไม่มีเรื่องย่อ" ? data.synopsis : undefined,
-      latestChapter: chapterNumber ? { set: Math.max(chapterNumber, 1) } : undefined,
+      ...scrapedMetaUpdate(meta),
     },
   });
 
-  // If this chapter has pages/images, save the chapter!
+  // Save the chapter when this payload carries page images
   if (chapterNumber !== null && data.images && data.images.length > 0) {
     await prisma.chapter.upsert({
       where: {
-        mangaId_number: {
-          mangaId: mangaRecord.id,
-          number: chapterNumber,
-        },
+        mangaId_number: { mangaId: mangaRecord.id, number: chapterNumber },
       },
       create: {
         number: chapterNumber,
@@ -494,7 +490,6 @@ export async function saveScrapedManga(data: {
       },
     });
 
-    // Update manga's latestChapter and updatedAt when a chapter is saved
     await prisma.manga.update({
       where: { id: mangaRecord.id },
       data: {
@@ -504,15 +499,12 @@ export async function saveScrapedManga(data: {
     });
   }
 
-  // If chapters list is provided from series page, update latestChapter on mangaRecord (NEVER create empty chapters with pages: [])
+  // Series page: bump latestChapter from the chapter list (never create empty chapters)
   if (data.chapters && data.chapters.length > 0) {
     let maxFound = mangaRecord.latestChapter || 1;
     for (const ch of data.chapters) {
-      const match = ch.title.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || ch.url.match(/ตอนที่-(\d+(\.\d+)?)/i);
-      const num = match ? parseFloat(match[1]) : null;
-      if (num !== null && num > maxFound) {
-        maxFound = num;
-      }
+      const num = typeof ch.number === "number" ? ch.number : parseChapterNumber(ch.title, ch.url);
+      if (num !== null && num > maxFound) maxFound = num;
     }
     if (maxFound > mangaRecord.latestChapter) {
       await prisma.manga.update({
@@ -525,6 +517,6 @@ export async function saveScrapedManga(data: {
   const updatedManga = await getMangaBySlug(slug);
   return {
     manga: updatedManga || formatManga(mangaRecord),
-    chapterNumber: chapterNumber || undefined,
+    chapterNumber: chapterNumber ?? undefined,
   };
 }
