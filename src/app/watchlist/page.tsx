@@ -851,7 +851,10 @@ export default function WatchlistPage() {
                 };
                 return (
                   <div key={log.id} className="flex items-start gap-2.5 leading-relaxed">
-                    <span className="text-zinc-600 shrink-0 select-none">[{log.timestamp}]</span>
+                    {/* Server (UTC) and browser (Asia/Bangkok) render different times for the initial log line */}
+                    <span className="text-zinc-600 shrink-0 select-none" suppressHydrationWarning>
+                      [{log.timestamp}]
+                    </span>
                     <span className={colors[log.type]}>{log.message}</span>
                   </div>
                 );

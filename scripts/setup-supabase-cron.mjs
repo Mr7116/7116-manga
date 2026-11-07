@@ -1,5 +1,5 @@
 /**
- * Supabase pg_cron setup — runs the sync every 2 minutes from inside your database,
+ * Supabase pg_cron setup — ticks /api/cron/sync every minute from inside your database,
  * so nothing on your computer or in a browser needs to stay open.
  *
  *   npm run cron:setup              create / update the job
@@ -15,8 +15,12 @@ try {
   process.loadEnvFile();
 } catch {}
 
-const JOB_NAME = "manga-sync-every-2-min";
-const SCHEDULE = "*/2 * * * *";
+// Ticks every minute. pg_net's HTTP/2 connection to Vercel fails on every other
+// request ("Error in the HTTP2 framing layer"), so a 1-minute tick guarantees a
+// successful call at least every 2 minutes. Ticks that aren't due return instantly.
+const JOB_NAME = "manga-sync-tick";
+const SCHEDULE = "* * * * *";
+const LEGACY_JOB_NAMES = ["manga-sync-every-2-min"];
 
 const args = process.argv.slice(2);
 const mode = args.includes("--remove") ? "remove" : args.includes("--status") ? "status" : "setup";
@@ -66,12 +70,19 @@ async function setup() {
       timeout_milliseconds := 60000
     );`;
 
+  // Remove jobs created by older versions of this script
+  for (const legacy of LEGACY_JOB_NAMES) {
+    await prisma.$queryRawUnsafe(
+      `select cron.unschedule(jobid) from cron.job where jobname = ${sqlLiteral(legacy)}`
+    );
+  }
+
   // cron.schedule with the same name updates the existing job
   await prisma.$queryRawUnsafe(
     `select cron.schedule(${sqlLiteral(JOB_NAME)}, ${sqlLiteral(SCHEDULE)}, ${sqlLiteral(command)})`
   );
 
-  console.log(`✅ pg_cron job "${JOB_NAME}" → POST ${appUrl}/api/cron/sync every 2 minutes`);
+  console.log(`✅ pg_cron job "${JOB_NAME}" → POST ${appUrl}/api/cron/sync every minute (syncs when due)`);
   console.log("   Turn the scheduler ON and pick the interval on /watchlist.");
   console.log("   Check it in ~3 minutes with:  npm run cron:setup -- --status");
 }
@@ -95,7 +106,7 @@ async function status() {
 
   try {
     const http = await prisma.$queryRawUnsafe(
-      `select status_code, left(content, 160) as content, created from net._http_response order by created desc limit 5`
+      `select status_code, timed_out, left(coalesce(error_msg, ''), 80) as error_msg, left(content, 120) as content, created from net._http_response order by created desc limit 6`
     );
     console.log("Last HTTP responses from /api/cron/sync:");
     console.table(http);
@@ -103,9 +114,11 @@ async function status() {
 }
 
 async function remove() {
-  await prisma.$queryRawUnsafe(
-    `select cron.unschedule(jobid) from cron.job where jobname = ${sqlLiteral(JOB_NAME)}`
-  );
+  for (const name of [JOB_NAME, ...LEGACY_JOB_NAMES]) {
+    await prisma.$queryRawUnsafe(
+      `select cron.unschedule(jobid) from cron.job where jobname = ${sqlLiteral(name)}`
+    );
+  }
   console.log(`🗑️  removed job "${JOB_NAME}"`);
 }
 
