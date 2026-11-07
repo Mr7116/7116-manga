@@ -26,7 +26,7 @@ export async function scrapeChapterImages(chapterUrl: string): Promise<string[]>
           "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
       },
-      signal: AbortSignal.timeout(3500),
+      signal: AbortSignal.timeout(8000),
       next: { revalidate: 0 },
     });
 
@@ -88,7 +88,7 @@ export async function syncMangaFromUrl(
         "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
     },
-    signal: AbortSignal.timeout(3500),
+    signal: AbortSignal.timeout(8000),
     next: { revalidate: 0 },
   });
 
@@ -257,7 +257,7 @@ export async function syncMangaFromUrl(
 
   // 4. Download only new/missing chapters
   for (const ch of chaptersToDownload) {
-    if (options?.startTime && Date.now() - options.startTime > (options.maxDurationMs || 5000)) {
+    if (options?.startTime && Date.now() - options.startTime > (options.maxDurationMs || 25000)) {
       break;
     }
     try {
@@ -308,8 +308,12 @@ export async function syncMangaFromUrl(
 
   // Count current chapters in DB with downloaded images
   const totalDbChapters = completedChapterSet.size + downloadedChapters.length;
+  const allDbChapterNumbers = Array.from(completedChapterSet).concat(downloadedChapters);
+  const latestDbChapterNumber = allDbChapterNumbers.length > 0 ? Math.max(...allDbChapterNumbers) : 0;
 
   // 5. Update or Upsert WatchedManga Record
+  const hasUnresolvedChapters = missingChapters.length > 0 && downloadedChapters.length === 0;
+
   await prisma.watchedManga.upsert({
     where: { url: safeUrl },
     create: {
@@ -319,15 +323,15 @@ export async function syncMangaFromUrl(
       cover: cover || mangaRecord.cover,
       status: "active",
       latestChapterOnWeb: latestWebChapter,
-      latestChapterInDb: totalDbChapters,
-      lastSyncedAt: new Date(),
+      latestChapterInDb: latestDbChapterNumber,
+      lastSyncedAt: hasUnresolvedChapters ? undefined : new Date(),
     },
     update: {
       title,
       cover: cover || undefined,
       latestChapterOnWeb: latestWebChapter,
-      latestChapterInDb: totalDbChapters,
-      lastSyncedAt: new Date(),
+      latestChapterInDb: latestDbChapterNumber,
+      lastSyncedAt: hasUnresolvedChapters ? undefined : new Date(),
       lastError: null,
     },
   });
@@ -343,10 +347,10 @@ export async function syncMangaFromUrl(
   };
 }
 
-// Sync active watched mangas in the watchlist with strict Time Budget Guard (< 5.5s)
+// Sync active watched mangas in the watchlist with safe time budget
 export async function syncAllWatchedMangas(options?: { maxNewChapters?: number; limit?: number }) {
   const startTime = Date.now();
-  const TIME_BUDGET_MS = 5500; // Strictly ensure under 5.5 seconds to guarantee 200 OK on Vercel Hobby!
+  const TIME_BUDGET_MS = 25000; // Allow sufficient time for scraping new chapters within 60s maxDuration
   const maxChapters = typeof options?.maxNewChapters === "number" ? options.maxNewChapters : 2;
   const limit = options?.limit !== undefined ? options.limit : 2; // Process 1-2 mangas per run
 

@@ -12,20 +12,25 @@ export async function GET() {
       orderBy: { updatedAt: "desc" },
     });
 
-    // Also get real-time chapter count in DB for each watched manga
+    // Also get real-time chapter count and latest chapter in DB for each watched manga
     const enrichedList = await Promise.all(
       list.map(async (item) => {
         const manga = await prisma.manga.findUnique({
           where: { slug: item.slug },
           select: {
             id: true,
+            latestChapter: true,
             _count: { select: { chapters: true } },
           },
         });
 
+        const totalChaptersInDb = manga?._count?.chapters || 0;
+        const latestChapterInDb = manga?.latestChapter || item.latestChapterInDb || 0;
+
         return {
           ...item,
-          totalChaptersInDb: manga?._count?.chapters || item.latestChapterInDb || 0,
+          totalChaptersInDb,
+          latestChapterInDb,
         };
       })
     );

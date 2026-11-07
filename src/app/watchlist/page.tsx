@@ -686,7 +686,8 @@ export default function WatchlistPage() {
           ) : (
             <div className="grid grid-cols-1 gap-4">
               {watchlist.map((item) => {
-                const missingCount = Math.max(0, item.latestChapterOnWeb - item.totalChaptersInDb);
+                const effectiveDbLatest = item.latestChapterInDb || item.totalChaptersInDb;
+                const missingCount = Math.max(0, item.latestChapterOnWeb - effectiveDbLatest);
                 const isSyncingThis = syncingId === item.id || syncingAll;
 
                 return (
@@ -756,17 +757,16 @@ export default function WatchlistPage() {
                           <div>
                             ในระบบ:{" "}
                             <span className="font-bold text-white">
-                              {item.totalChaptersInDb}
+                              ตอนที่ {effectiveDbLatest}
                             </span>{" "}
-                            ตอน
+                            <span className="text-[11px] text-zinc-500">({item.totalChaptersInDb} ตอน)</span>
                           </div>
                           <span className="text-zinc-600">•</span>
                           <div>
                             บนเว็บ:{" "}
                             <span className="font-bold text-emerald-400">
-                              {item.latestChapterOnWeb}
-                            </span>{" "}
-                            ตอน
+                              ตอนที่ {item.latestChapterOnWeb}
+                            </span>
                           </div>
                           <span className="text-zinc-600">•</span>
                           <div className="text-[11px] text-zinc-500">
