@@ -39,9 +39,9 @@ async function handleSync(request: Request) {
       if (!isNaN(parsed)) limit = parsed;
     }
 
-    // Single manga sync
+    // Single manga sync (explicitly requested by user)
     if (targetUrl) {
-      const result = await syncMangaFromUrl(targetUrl, { maxNewChapters });
+      const result = await syncMangaFromUrl(targetUrl, { maxNewChapters, forceBump: true });
       return NextResponse.json({
         success: true,
         type: "single",

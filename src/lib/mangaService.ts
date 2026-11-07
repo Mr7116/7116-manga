@@ -46,11 +46,11 @@ function formatManga(m: any): CleanManga {
   }));
 
   // True latest chapter update timestamp for sorting:
-  // Whichever manga has the newest chapter created/added sits at the top-left!
+  // Whichever manga has the newest chapter created/added or newest update sits at the top-left!
   const chapterTimestamps = chapters.map((c: any) => (c.createdAt ? new Date(c.createdAt).getTime() : 0));
   const maxChapterTime = chapterTimestamps.length > 0 ? Math.max(...chapterTimestamps) : 0;
   const mangaTimestamp = m.updatedAt ? new Date(m.updatedAt).getTime() : 0;
-  const latestUpdateTimestamp = maxChapterTime > 0 ? maxChapterTime : mangaTimestamp;
+  const latestUpdateTimestamp = Math.max(maxChapterTime, mangaTimestamp);
 
   return {
     id: m.id,

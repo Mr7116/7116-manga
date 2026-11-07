@@ -1,6 +1,7 @@
 import { prisma } from "./prisma";
 import * as cheerio from "cheerio";
 import { slugify, findMatchingMangaSlug } from "./mangaService";
+import { revalidatePath } from "next/cache";
 
 // Helper to safely normalize Thai URLs
 export function normalizeThaiUrl(inputUrl: string): string {
@@ -73,6 +74,7 @@ export async function syncMangaFromUrl(
     targetSlug?: string;
     startTime?: number;
     maxDurationMs?: number;
+    forceBump?: boolean;
   }
 ) {
   const safeUrl = normalizeThaiUrl(seriesUrl);
@@ -187,33 +189,38 @@ export async function syncMangaFromUrl(
 
   const latestWebChapter = webChapters.length > 0 ? Math.max(...webChapters.map((c) => c.number)) : 1;
 
-  // 2. Upsert Manga Record in DB
+  // 2. Ensure Manga Record exists in DB (avoid touching updatedAt on existing manga during routine cron checks)
   const existingManga = await prisma.manga.findUnique({ where: { slug } });
   const isPosterCover = cover && !cover.includes("-ep") && !cover.includes("-ตอนที่-");
-  const shouldUpdateCover = !existingManga?.cover || existingManga.cover.includes("-ep") || existingManga.cover.includes("-ตอนที่-") || isPosterCover;
+  const shouldUpdateCover = cover && (!existingManga?.cover || existingManga.cover.includes("-ep") || existingManga.cover.includes("-ตอนที่-") || (isPosterCover && existingManga.cover !== cover));
 
-  const mangaRecord = await prisma.manga.upsert({
-    where: { slug },
-    create: {
-      slug,
-      title,
-      thaiTitle: title,
-      cover: cover || "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=600",
-      banner: cover || null,
-      synopsis,
-      status: "Ongoing",
-      type: "MANHWA",
-      isColor: true,
-      genres: "Action,Fantasy,พระเอกเทพ",
-      latestChapter: latestWebChapter,
-    },
-    update: {
-      cover: (shouldUpdateCover && cover) ? cover : undefined,
-      banner: (shouldUpdateCover && cover) ? cover : undefined,
-      latestChapter: { set: Math.max(latestWebChapter, existingManga?.latestChapter || 1) },
-      synopsis: synopsis || undefined,
-    },
-  });
+  let mangaRecord = existingManga;
+  if (!mangaRecord) {
+    mangaRecord = await prisma.manga.create({
+      data: {
+        slug,
+        title,
+        thaiTitle: title,
+        cover: cover || "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=600",
+        banner: cover || null,
+        synopsis,
+        status: "Ongoing",
+        type: "MANHWA",
+        isColor: true,
+        genres: "Action,Fantasy,พระเอกเทพ",
+        latestChapter: latestWebChapter,
+      },
+    });
+  } else if (shouldUpdateCover && mangaRecord) {
+    mangaRecord = await prisma.manga.update({
+      where: { id: mangaRecord.id },
+      data: {
+        cover,
+        banner: cover,
+        synopsis: (synopsis && synopsis !== "ไม่มีเรื่องย่อ") ? synopsis : undefined,
+      },
+    });
+  }
 
   // 3. SMART INCREMENTAL DEDUPLICATION
   // Find all chapters in DB for this manga that ALREADY have pages
@@ -279,8 +286,8 @@ export async function syncMangaFromUrl(
     await new Promise((r) => setTimeout(r, 300));
   }
 
-  // If new chapters were downloaded, refresh manga updatedAt so it bumps to the top-left!
-  if (downloadedChapters.length > 0) {
+  // If new chapters were downloaded or forceBump requested, refresh manga updatedAt so it bumps to the top-left!
+  if (downloadedChapters.length > 0 || options?.forceBump) {
     await prisma.manga.update({
       where: { id: mangaRecord.id },
       data: {
@@ -288,6 +295,9 @@ export async function syncMangaFromUrl(
         latestChapter: Math.max(...downloadedChapters, mangaRecord.latestChapter),
       },
     });
+    try {
+      revalidatePath("/");
+    } catch {}
   }
 
   // Count current chapters in DB with downloaded images
