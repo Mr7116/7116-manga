@@ -116,13 +116,49 @@ export function parseThaiDateToTimestamp(text?: string | null): number {
   return 0;
 }
 
+const DATE_IN_TITLE_RE = (() => {
+  const months = Object.keys(THAI_MONTH_INDEX)
+    .sort((a, b) => b.length - a.length)
+    .map((m) => m.replace(/\./g, "\\."))
+    .join("|");
+  return new RegExp(
+    `\\s*(?:(?:${months})\\s*\\d{1,2}\\s*,?\\s*\\d{4}|\\d{1,2}\\s*(?:${months})\\s*,?\\s*\\d{4})\\s*$`,
+    "i"
+  );
+})();
+
+function shortThaiDate(d: Date): string {
+  return d.toLocaleDateString("th-TH", { day: "numeric", month: "short", timeZone: "Asia/Bangkok" });
+}
+
+/**
+ * Older imports stored the source link text as the title ("ตอนที่ 172 มิถุนายน 4, 2026") and
+ * a fixed "วันนี้" as release date. Split the date out of the title and never show a stale "วันนี้".
+ */
+function cleanChapterDisplay(c: any): { title: string; releaseDate: string } {
+  let title: string = c.title || `ตอนที่ ${c.number}`;
+  let releaseDate: string = c.releaseDate || "";
+  const dateMatch = title.match(DATE_IN_TITLE_RE);
+  if (dateMatch) {
+    title = title.slice(0, dateMatch.index).trim();
+    if (!releaseDate || releaseDate === "วันนี้") releaseDate = dateMatch[0].trim();
+  }
+  if (!releaseDate || releaseDate === "วันนี้") {
+    const created = c.createdAt ? new Date(c.createdAt) : null;
+    releaseDate =
+      created && Date.now() - created.getTime() > 24 * 60 * 60 * 1000
+        ? shortThaiDate(created)
+        : "วันนี้";
+  }
+  return { title, releaseDate };
+}
+
 // Convert Prisma model to UI CleanManga
 function formatManga(m: any): CleanManga {
   const chapters = (m.chapters || []).map((c: any) => ({
     id: c.id,
     number: c.number,
-    title: c.title,
-    releaseDate: c.releaseDate || "วันนี้",
+    ...cleanChapterDisplay(c),
     createdAt: c.createdAt ? new Date(c.createdAt).toISOString() : undefined,
     pages: c.pages ? (typeof c.pages === "string" ? JSON.parse(c.pages || "[]") : c.pages) : [],
   }));
@@ -290,6 +326,7 @@ export const getMangaBySlug = cache(async (slug: string): Promise<CleanManga | n
           number: true,
           title: true,
           releaseDate: true,
+          createdAt: true,
         },
         orderBy: { number: "desc" },
       },
@@ -349,6 +386,7 @@ export const getRelatedMangas = cache(async (excludeSlug: string, limit = 5): Pr
           number: true,
           title: true,
           releaseDate: true,
+          createdAt: true,
         },
         orderBy: { number: "desc" },
         take: 3,

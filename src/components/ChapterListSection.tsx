@@ -97,8 +97,12 @@ export default function ChapterListSection({ manga }: ChapterListSectionProps) {
                     <span className="flex items-center gap-1">
                       <Clock className="h-3 w-3" /> {ch.releaseDate}
                     </span>
-                    <span>•</span>
-                    <span>{ch.pages.length} หน้า</span>
+                    {ch.pages.length > 0 && (
+                      <>
+                        <span>•</span>
+                        <span>{ch.pages.length} หน้า</span>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>

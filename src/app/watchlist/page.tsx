@@ -690,12 +690,9 @@ export default function WatchlistPage() {
           ) : (
             <div className="grid grid-cols-1 gap-4">
               {watchlist.map((item) => {
-                // Missing = chapters on the source not yet downloaded (gaps count too, e.g. 3 of 48)
-                const missingCount = Math.max(
-                  0,
-                  item.latestChapterOnWeb - item.latestChapterInDb,
-                  Math.floor(item.latestChapterOnWeb) - item.totalChaptersInDb
-                );
+                // Backlogs download oldest-first, so the highest downloaded chapter tracks progress.
+                // (Counting rows gave false "1 missing" when the source skips a number.)
+                const missingCount = Math.max(0, Math.ceil(item.latestChapterOnWeb - item.latestChapterInDb));
                 const isSyncingThis = syncingId === item.id || syncingAll;
 
                 return (
