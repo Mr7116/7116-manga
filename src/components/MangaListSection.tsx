@@ -33,9 +33,11 @@ export default function MangaListSection({ initialMangas }: MangaListSectionProp
   });
 
   if (selectedOrder === "Order by Update") {
-    filteredManga = [...filteredManga].sort(
-      (a, b) => (b.latestUpdateTimestamp || 0) - (a.latestUpdateTimestamp || 0)
-    );
+    filteredManga = [...filteredManga].sort((a, b) => {
+      const diff = (b.latestUpdateTimestamp || 0) - (a.latestUpdateTimestamp || 0);
+      if (diff !== 0) return diff;
+      return (b.latestChapter || 0) - (a.latestChapter || 0);
+    });
   } else if (selectedOrder === "Rating") {
     filteredManga = [...filteredManga].sort((a, b) => b.rating - a.rating);
   } else if (selectedOrder === "A-Z") {

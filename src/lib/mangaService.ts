@@ -34,6 +34,78 @@ export interface CleanChapter {
   pages: string[];
 }
 
+const THAI_MONTH_INDEX: Record<string, number> = {
+  "มกราคม": 0, "ม.ค.": 0, "ม.ค": 0, "january": 0, "jan": 0,
+  "กุมภาพันธ์": 1, "ก.พ.": 1, "ก.พ": 1, "february": 1, "feb": 1,
+  "มีนาคม": 2, "มี.ค.": 2, "มี.ค": 2, "march": 2, "mar": 2,
+  "เมษายน": 3, "เม.ย.": 3, "เม.ย": 3, "april": 3, "apr": 3,
+  "พฤษภาคม": 4, "พ.ค.": 4, "พ.ค": 4, "may": 4,
+  "มิถุนายน": 5, "มิ.ย.": 5, "มิ.ย": 5, "june": 5, "jun": 5,
+  "กรกฎาคม": 6, "ก.ค.": 6, "ก.ค": 6, "july": 6, "jul": 6,
+  "สิงหาคม": 7, "ส.ค.": 7, "ส.ค": 7, "august": 7, "aug": 7,
+  "กันยายน": 8, "ก.ย.": 8, "ก.ย": 8, "september": 8, "sep": 8,
+  "ตุลาคม": 9, "ต.ค.": 9, "ต.ค": 9, "october": 9, "oct": 9,
+  "พฤศจิกายน": 10, "พ.ย.": 10, "พ.ย": 10, "november": 10, "nov": 10,
+  "ธันวาคม": 11, "ธ.ค.": 11, "ธ.ค": 11, "december": 11, "dec": 11,
+};
+
+export function parseThaiDateToTimestamp(text?: string | null): number {
+  if (!text || typeof text !== "string") return 0;
+  // Clean chapter number prefixes so numbers like "ตอนที่ 337" won't be mistaken for day/year
+  const str = text
+    .replace(/ตอนที่\s*\d+(\.\d+)?/gi, "")
+    .replace(/chapter\s*\d+(\.\d+)?/gi, "")
+    .replace(/ch\s*\d+(\.\d+)?/gi, "")
+    .trim();
+
+  if (!str) return 0;
+
+  const now = Date.now();
+  if (/วันนี้|today/i.test(str)) return now;
+  if (/เมื่อวาน|yesterday/i.test(str)) return now - 24 * 60 * 60 * 1000;
+
+  const minMatch = str.match(/(\d+)\s*(?:นาที|min(?:ute)?s?)\s*(?:ที่แล้ว|ago)/i);
+  if (minMatch) return now - parseInt(minMatch[1], 10) * 60 * 1000;
+
+  const hrMatch = str.match(/(\d+)\s*(?:ชั่วโมง|ชม\.?|hours?)\s*(?:ที่แล้ว|ago)/i);
+  if (hrMatch) return now - parseInt(hrMatch[1], 10) * 60 * 60 * 1000;
+
+  const dayMatch = str.match(/(\d+)\s*(?:วัน|days?)\s*(?:ที่แล้ว|ago)/i);
+  if (dayMatch) return now - parseInt(dayMatch[1], 10) * 24 * 60 * 60 * 1000;
+
+  const monthNames = Object.keys(THAI_MONTH_INDEX).sort((a, b) => b.length - a.length).join("|");
+
+  // Format 1: Full Month Day, Year e.g. "พฤศจิกายน 5, 2026"
+  const m1 = str.match(new RegExp(`(${monthNames})\\s*(\\d{1,2})\\s*,?\\s*(\\d{4})`, "i"));
+  if (m1) {
+    const month = THAI_MONTH_INDEX[m1[1].toLowerCase()];
+    const day = parseInt(m1[2], 10);
+    let year = parseInt(m1[3], 10);
+    if (year > 2400) year -= 543;
+    return new Date(year, month, day, 12, 0, 0).getTime();
+  }
+
+  // Format 2: Day Month Year e.g. "5 พฤศจิกายน 2026" or "10 พฤศจิกายน 2025"
+  const m2 = str.match(new RegExp(`(\\d{1,2})\\s*(${monthNames})\\s*,?\\s*(\\d{4})`, "i"));
+  if (m2) {
+    const day = parseInt(m2[1], 10);
+    const month = THAI_MONTH_INDEX[m2[2].toLowerCase()];
+    let year = parseInt(m2[3], 10);
+    if (year > 2400) year -= 543;
+    return new Date(year, month, day, 12, 0, 0).getTime();
+  }
+
+  // Format 3: Short date without year e.g. "6 พ.ย." or "29 ต.ค." -> defaults to current year (2026)
+  const m3 = str.match(new RegExp(`^(\\d{1,2})\\s*(${monthNames})$`, "i"));
+  if (m3) {
+    const day = parseInt(m3[1], 10);
+    const month = THAI_MONTH_INDEX[m3[2].toLowerCase()];
+    return new Date(2026, month, day, 12, 0, 0).getTime();
+  }
+
+  return 0;
+}
+
 // Convert Prisma model to UI CleanManga
 function formatManga(m: any): CleanManga {
   const chapters = (m.chapters || []).map((c: any) => ({
@@ -45,12 +117,22 @@ function formatManga(m: any): CleanManga {
     pages: c.pages ? (typeof c.pages === "string" ? JSON.parse(c.pages || "[]") : c.pages) : [],
   }));
 
-  // True latest chapter update timestamp for sorting:
-  // Whichever manga has the newest chapter created/added or newest update sits at the top-left!
-  const chapterTimestamps = chapters.map((c: any) => (c.createdAt ? new Date(c.createdAt).getTime() : 0));
-  const maxChapterTime = chapterTimestamps.length > 0 ? Math.max(...chapterTimestamps) : 0;
-  const mangaTimestamp = m.updatedAt ? new Date(m.updatedAt).getTime() : 0;
-  const latestUpdateTimestamp = Math.max(maxChapterTime, mangaTimestamp);
+  // True latest chapter release date for sorting:
+  // Sort by the actual published date of the latest chapter (วันที่ล่าสุดของตอนล่าสุด)
+  let latestUpdateTimestamp = 0;
+  for (const c of chapters) {
+    const tsTitle = parseThaiDateToTimestamp(c.title);
+    const tsRel = parseThaiDateToTimestamp(c.releaseDate);
+    const tsCreated = c.createdAt ? new Date(c.createdAt).getTime() : 0;
+    const effectiveTs = tsTitle || tsRel || tsCreated;
+    if (effectiveTs > latestUpdateTimestamp) {
+      latestUpdateTimestamp = effectiveTs;
+    }
+  }
+
+  if (latestUpdateTimestamp === 0) {
+    latestUpdateTimestamp = m.updatedAt ? new Date(m.updatedAt).getTime() : 0;
+  }
 
   return {
     id: m.id,
@@ -183,8 +265,12 @@ export async function getAllMangas(filter?: {
 
   let formatted = mangas.map(formatManga);
 
-  // Whichever manga has the newest chapter update sits at the top-left (index 0)
-  formatted.sort((a, b) => b.latestUpdateTimestamp - a.latestUpdateTimestamp);
+  // Whichever manga has the newest chapter date sits at the top-left (index 0)
+  formatted.sort((a, b) => {
+    const diff = (b.latestUpdateTimestamp || 0) - (a.latestUpdateTimestamp || 0);
+    if (diff !== 0) return diff;
+    return (b.latestChapter || 0) - (a.latestChapter || 0);
+  });
 
   if (filter?.genre && filter.genre !== "Genre All" && filter.genre !== "ทั้งหมด") {
     formatted = formatted.filter((m) => m.genres.includes(filter.genre!));

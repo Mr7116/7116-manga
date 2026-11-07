@@ -160,11 +160,15 @@ export async function syncMangaFromUrl(
   }
 
   // Extract all chapters available on web
-  const webChapters: { number: number; title: string; url: string }[] = [];
-  $(".eplister a, .clplist a, ul.chapters a, .chapter-list a, select#chapter option").each((_, el) => {
-    const linkHref = $(el).attr("href") || $(el).attr("value");
-    const linkText = $(el).text().trim();
-    if (linkHref && (linkHref.includes("chapter") || linkHref.includes("ตอนที่") || /ตอนที่|\bch\b/i.test(linkText))) {
+  const webChapters: { number: number; title: string; url: string; releaseDate?: string }[] = [];
+  $(".eplister li, .clplist li, ul.chapters li, .chapter-list li, .eplister a, .clplist a, select#chapter option").each((_, el) => {
+    const $el = $(el);
+    const linkEl = $el.is("a") ? $el : $el.find("a").first();
+    const linkHref = linkEl.attr("href") || $el.attr("value");
+    const numText = $el.find(".chapternum").text().trim() || linkEl.text().trim() || $el.text().trim();
+    const dateText = $el.find(".chapterdate").text().trim();
+
+    if (linkHref && (linkHref.includes("chapter") || linkHref.includes("ตอนที่") || /ตอนที่|\bch\b/i.test(numText))) {
       let fullUrl = linkHref;
       if (!fullUrl.startsWith("http")) {
         try {
@@ -173,7 +177,7 @@ export async function syncMangaFromUrl(
           return;
         }
       }
-      const match = linkText.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || fullUrl.match(/ตอนที่-(\d+(\.\d+)?)/i);
+      const match = numText.match(/ตอนที่\s*(\d+(\.\d+)?)/i) || fullUrl.match(/ตอนที่-(\d+(\.\d+)?)/i);
       if (match && match[1]) {
         const num = parseFloat(match[1]);
         if (!webChapters.some((c) => c.number === num)) {
@@ -181,6 +185,7 @@ export async function syncMangaFromUrl(
             number: num,
             title: `ตอนที่ ${num}`,
             url: fullUrl,
+            releaseDate: dateText || undefined,
           });
         }
       }
@@ -269,12 +274,13 @@ export async function syncMangaFromUrl(
             number: ch.number,
             title: ch.title,
             pages: JSON.stringify(pages),
-            releaseDate: "วันนี้",
+            releaseDate: ch.releaseDate || "วันนี้",
             mangaId: mangaRecord.id,
           },
           update: {
             pages: JSON.stringify(pages),
             title: ch.title,
+            releaseDate: ch.releaseDate ? ch.releaseDate : undefined,
           },
         });
         downloadedChapters.push(ch.number);

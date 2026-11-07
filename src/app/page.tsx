@@ -3,9 +3,8 @@ import Footer from "@/components/Footer";
 import MangaListSection from "@/components/MangaListSection";
 import { getAllMangas } from "@/lib/mangaService";
 
-// Revalidate homepage every 60 seconds on Edge CDN (ISR)
-// Served instantly in ~20ms from nearest CDN cache
-export const revalidate = 60;
+// Real-time server-rendered homepage (instant updates when new chapters appear)
+export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
   const mangas = await getAllMangas();
