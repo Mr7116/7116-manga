@@ -128,6 +128,35 @@ export async function POST(request: Request) {
 
     const safeUrl = normalizeThaiUrl(rawUrl);
 
+    // Extra source for an existing manga: chapters from this URL are merged into targetSlug
+    if (typeof body.targetSlug === "string" && body.targetSlug) {
+      const manga = await prisma.manga.findUnique({
+        where: { slug: body.targetSlug },
+        select: { slug: true, title: true },
+      });
+      if (!manga) {
+        return NextResponse.json({ success: false, error: "ไม่พบมังงะเรื่องนี้ในระบบ" }, { status: 404 });
+      }
+      const existing = await prisma.watchedManga.findUnique({ where: { url: safeUrl } });
+      if (existing && existing.slug !== manga.slug) {
+        return NextResponse.json(
+          { success: false, error: `URL นี้เป็นแหล่งของเรื่องอื่นอยู่แล้ว (${existing.title})` },
+          { status: 409 }
+        );
+      }
+      const syncResult = await syncMangaFromUrl(safeUrl, {
+        targetSlug: manga.slug,
+        maxNewChapters: typeof maxNewChapters === "number" ? maxNewChapters : 3,
+      });
+      const watchedItem = await prisma.watchedManga.findUnique({ where: { url: safeUrl } });
+      return NextResponse.json({
+        success: true,
+        message: `เพิ่มแหล่งข้อมูลให้ "${manga.title}" แล้ว`,
+        data: watchedItem,
+        syncResult,
+      });
+    }
+
     // If scanNow is requested, perform incremental sync immediately
     if (scanNow) {
       const syncResult = await syncMangaFromUrl(safeUrl, {

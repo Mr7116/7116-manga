@@ -55,8 +55,19 @@ export async function syncMangaFromUrl(
 
   // 3. Ensure Manga record exists (don't touch updatedAt during routine checks)
   const existingManga = await prisma.manga.findUnique({ where: { slug } });
+
+  // A manga can have several source URLs. Only the primary (first added) source may change
+  // the cover and metadata; extra sources just contribute chapters.
+  const primarySource = await prisma.watchedManga.findFirst({
+    where: { slug },
+    orderBy: { createdAt: "asc" },
+    select: { url: true },
+  });
+  const isPrimarySource = !primarySource || primarySource.url === safeUrl;
+
   const isPosterCover = cover && !cover.includes("-ep") && !cover.includes("-ตอนที่-");
   const shouldUpdateCover =
+    isPrimarySource &&
     !!cover &&
     (!existingManga?.cover ||
       existingManga.cover.includes("-ep") ||
@@ -87,7 +98,7 @@ export async function syncMangaFromUrl(
     });
   } else {
     // Fill in real metadata whenever the source page provides it
-    const metaUpdate = scrapedMetaUpdate(meta);
+    const metaUpdate = isPrimarySource ? scrapedMetaUpdate(meta) : {};
     const hasMeta = Object.values(metaUpdate).some((v) => v !== undefined);
     if (shouldUpdateCover || hasMeta) {
       mangaRecord = await prisma.manga.update({

@@ -36,6 +36,13 @@ interface WatchedItem {
   totalChaptersInDb: number;
   lastSyncedAt?: string;
   lastError?: string;
+  createdAt?: string;
+}
+
+/** One card per manga: the first-added URL is the primary source, others are extra sources. */
+interface WatchGroup {
+  item: WatchedItem; // primary, with latestChapterOnWeb = max over all sources
+  sources: WatchedItem[]; // all sources, primary first
 }
 
 interface LogEntry {
@@ -54,6 +61,9 @@ export default function WatchlistPage() {
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [syncProgress, setSyncProgress] = useState<{ done: number; remaining: number } | null>(null);
   const stopSyncRef = useRef(false);
+  const [addingSourceFor, setAddingSourceFor] = useState<string | null>(null);
+  const [sourceInput, setSourceInput] = useState("");
+  const [savingSource, setSavingSource] = useState(false);
 
   // Auto-Scheduler States (Persistent)
   const [autoScheduleActive, setAutoScheduleActive] = useState(false);
@@ -315,7 +325,7 @@ export default function WatchlistPage() {
   // Sync single manga
   // Sync one manga repeatedly until every chapter on the source is downloaded.
   // Each request downloads a batch (~8 chapters); press the button again to stop.
-  const handleSyncSingle = async (item: WatchedItem) => {
+  const handleSyncSingle = async (item: WatchedItem, sources: WatchedItem[] = [item]) => {
     if (syncingId === item.id) {
       stopSyncRef.current = true;
       addLog(`⏹ กำลังหยุดซิงค์ [${item.title}] หลังจบรอบนี้...`, "warn");
@@ -330,7 +340,13 @@ export default function WatchlistPage() {
 
     let totalNew = 0;
     let busyRetries = 0;
+    let complete = false;
     try {
+     for (const [srcIdx, source] of sources.entries()) {
+      if (stopSyncRef.current || complete) break;
+      if (sources.length > 1) {
+        addLog(`🌐 [${item.title}] แหล่งที่ ${srcIdx + 1}/${sources.length}: ${source.url}`, "info");
+      }
       for (let round = 1; round <= 200; round++) {
         if (stopSyncRef.current) {
           addLog(`⏹ หยุดซิงค์ [${item.title}] แล้ว (ดึงไป ${totalNew} ตอน) ที่เหลือระบบอัตโนมัติจะดึงต่อเอง`, "warn");
@@ -340,7 +356,7 @@ export default function WatchlistPage() {
         const res = await fetch("/api/cron/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: item.url }),
+          body: JSON.stringify({ url: source.url }),
         });
         const text = await res.text();
         let data: any;
@@ -374,16 +390,23 @@ export default function WatchlistPage() {
         fetchWatchlist();
 
         if (remaining <= 0) {
-          addLog(`✅ [${r.title}] ซิงค์ครบทุกตอนแล้ว (โหลดใหม่รวม ${totalNew} ตอน)`, "success");
+          complete = true;
+          addLog(`✅ [${item.title}] ซิงค์ครบทุกตอนแล้ว (โหลดใหม่รวม ${totalNew} ตอน)`, "success");
           break;
         }
         if (r.newChaptersDownloaded === 0) {
           // Nothing more could be downloaded (source/mirror has no images for the rest)
           const failed = (r.failedChapterNumbers || []).map((n: number) => `ตอนที่ ${n}`).join(", ");
-          addLog(`⚠️ [${r.title}] ยังขาด ${remaining} ตอนที่ดึงรูปไม่ได้${failed ? `: ${failed}` : ""}`, "warn");
+          addLog(
+            `⚠️ [${r.title}] แหล่งนี้ยังขาด ${remaining} ตอนที่ดึงรูปไม่ได้${failed ? `: ${failed}` : ""}${
+              srcIdx < sources.length - 1 ? " → ลองแหล่งถัดไป" : ""
+            }`,
+            "warn"
+          );
           break;
         }
       }
+     }
     } catch (err: any) {
       addLog(`❌ ซิงค์ล้มเหลว [${item.title}]: ${err.message}`, "error");
     } finally {
@@ -466,23 +489,85 @@ export default function WatchlistPage() {
     }
   };
 
-  // Delete from watchlist
-  const handleDelete = async (item: WatchedItem) => {
+  // Delete a manga (all of its sources) from the watchlist
+  const handleDelete = async (item: WatchedItem, sources: WatchedItem[] = [item]) => {
     if (!confirm(`คุณต้องการลบ "${item.title}" ออกจากรายการติดตามหรือไม่? (ข้อมูลตอนที่เคยบันทึกไว้จะไม่หาย)`)) {
       return;
     }
 
     try {
-      const res = await fetch(`/api/watchlist?id=${item.id}`, { method: "DELETE" });
-      const data = await res.json();
-      if (data.success) {
-        addLog(`🗑️ ลบ [${item.title}] ออกจากรายการติดตามแล้ว`, "warn");
-        await fetchWatchlist();
+      for (const src of sources) {
+        await fetch(`/api/watchlist?id=${src.id}`, { method: "DELETE" });
       }
+      addLog(`🗑️ ลบ [${item.title}] ออกจากรายการติดตามแล้ว`, "warn");
+      await fetchWatchlist();
     } catch (err: any) {
       addLog(`ลบไม่สำเร็จ: ${err.message}`, "error");
     }
   };
+
+  // Remove one extra source URL (chapters already downloaded stay)
+  const handleRemoveSource = async (src: WatchedItem) => {
+    if (!confirm(`ลบแหล่งข้อมูลนี้?\n${src.url}`)) return;
+    try {
+      await fetch(`/api/watchlist?id=${src.id}`, { method: "DELETE" });
+      addLog(`🗑️ ลบแหล่งข้อมูล ${src.url}`, "warn");
+      await fetchWatchlist();
+    } catch (err: any) {
+      addLog(`ลบแหล่งไม่สำเร็จ: ${err.message}`, "error");
+    }
+  };
+
+  // Add another source URL for an existing manga
+  const handleAddSource = async (item: WatchedItem) => {
+    const url = sourceInput.trim();
+    if (!url.startsWith("http")) {
+      addLog("กรุณาใส่ URL หน้าเรื่องที่ขึ้นต้นด้วย http/https", "error");
+      return;
+    }
+    setSavingSource(true);
+    addLog(`➕ เพิ่มแหล่งข้อมูลให้ [${item.title}]: ${url}`, "info");
+    try {
+      const res = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, targetSlug: item.slug }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "เพิ่มแหล่งไม่สำเร็จ");
+      const r = data.syncResult;
+      addLog(
+        `✅ ${data.message}${r ? ` — แหล่งนี้มี ${r.totalWebChapters} ตอน, โหลดใหม่ ${r.newChaptersDownloaded} ตอน` : ""}`,
+        "success"
+      );
+      setSourceInput("");
+      setAddingSourceFor(null);
+      await fetchWatchlist();
+    } catch (err: any) {
+      addLog(`❌ ${err.message}`, "error");
+    } finally {
+      setSavingSource(false);
+    }
+  };
+
+  // Group sources by manga slug; the first-added URL is the primary
+  const groupedWatchlist: WatchGroup[] = (() => {
+    const bySlug = new Map<string, WatchedItem[]>();
+    for (const w of watchlist) {
+      const key = w.slug && w.slug !== "pending-import" ? w.slug : `id:${w.id}`;
+      bySlug.set(key, [...(bySlug.get(key) ?? []), w]);
+    }
+    return Array.from(bySlug.values()).map((list) => {
+      const sources = [...list].sort(
+        (a, b) => new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime()
+      );
+      const item = {
+        ...sources[0],
+        latestChapterOnWeb: Math.max(...sources.map((x) => x.latestChapterOnWeb || 0)),
+      };
+      return { item, sources };
+    });
+  })();
 
   const formatTimeRemaining = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -709,7 +794,7 @@ export default function WatchlistPage() {
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-black text-white flex items-center gap-2">
               <Flame className="w-5 h-5 text-amber-400" />
-              <span>มังงะในรายการติดตาม ({watchlist.length} เรื่อง)</span>
+              <span>มังงะในรายการติดตาม ({groupedWatchlist.length} เรื่อง)</span>
             </h2>
             <button
               onClick={fetchWatchlist}
@@ -734,7 +819,7 @@ export default function WatchlistPage() {
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-4">
-              {watchlist.map((item) => {
+              {groupedWatchlist.map(({ item, sources }) => {
                 // Backlogs download oldest-first, so the highest downloaded chapter tracks progress.
                 // (Counting rows gave false "1 missing" when the source skips a number.)
                 const missingCount = Math.max(0, Math.ceil(item.latestChapterOnWeb - item.latestChapterInDb));
@@ -832,6 +917,75 @@ export default function WatchlistPage() {
                             <span className="truncate">{item.lastError}</span>
                           </div>
                         )}
+
+                        {/* Extra sources */}
+                        {sources.length > 1 && (
+                          <div className="mt-2 space-y-1">
+                            {sources.slice(1).map((src, i) => (
+                              <div key={src.id} className="flex items-center gap-2 text-[11px] text-zinc-400 min-w-0">
+                                <span className="shrink-0 px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/20 font-bold">
+                                  แหล่ง {i + 2}
+                                </span>
+                                <a href={src.url} target="_blank" rel="noopener noreferrer" className="truncate hover:text-sky-300">
+                                  {src.url}
+                                </a>
+                                <span className="shrink-0 text-zinc-500">ตอนที่ {src.latestChapterOnWeb}</span>
+                                {src.lastError && (
+                                  <span className="shrink-0 text-amber-400" title={src.lastError}>
+                                    <AlertCircle className="w-3 h-3" />
+                                  </span>
+                                )}
+                                <button
+                                  onClick={() => handleRemoveSource(src)}
+                                  disabled={isSyncingThis}
+                                  className="shrink-0 text-zinc-500 hover:text-rose-400"
+                                  title="ลบแหล่งนี้"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {addingSourceFor === item.id ? (
+                          <div className="mt-2 flex items-center gap-2">
+                            <input
+                              autoFocus
+                              value={sourceInput}
+                              onChange={(e) => setSourceInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") handleAddSource(item);
+                                if (e.key === "Escape") setAddingSourceFor(null);
+                              }}
+                              placeholder="URL หน้าเรื่องจากเว็บอื่น เช่น https://www.go-manga.com/..."
+                              className="flex-1 min-w-0 bg-[#111317] border border-zinc-700 rounded-lg px-2.5 py-1.5 text-[11px] text-white placeholder:text-zinc-600 focus:outline-none focus:border-sky-500"
+                            />
+                            <button
+                              onClick={() => handleAddSource(item)}
+                              disabled={savingSource || !sourceInput.trim()}
+                              className="shrink-0 px-2.5 py-1.5 rounded-lg bg-sky-500/20 text-sky-300 border border-sky-500/40 text-[11px] font-bold disabled:opacity-50"
+                            >
+                              {savingSource ? "กำลังเพิ่ม..." : "เพิ่ม"}
+                            </button>
+                            <button
+                              onClick={() => setAddingSourceFor(null)}
+                              className="shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300"
+                            >
+                              ยกเลิก
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              setAddingSourceFor(item.id);
+                              setSourceInput("");
+                            }}
+                            className="mt-2 text-[11px] text-sky-400 hover:text-sky-300 font-semibold"
+                          >
+                            + เพิ่มแหล่งดึงข้อมูล
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -848,7 +1002,7 @@ export default function WatchlistPage() {
 
                       {/* Sync This Manga */}
                       <button
-                        onClick={() => handleSyncSingle(item)}
+                        onClick={() => handleSyncSingle(item, sources)}
                         disabled={syncingAll || (!!syncingId && syncingId !== item.id)}
                         className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-xs font-bold transition-all disabled:opacity-50"
                       >
@@ -866,7 +1020,7 @@ export default function WatchlistPage() {
 
                       {/* Delete */}
                       <button
-                        onClick={() => handleDelete(item)}
+                        onClick={() => handleDelete(item, sources)}
                         disabled={isSyncingThis}
                         className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 transition-colors"
                         title="ลบออกจากรายการติดตาม"
