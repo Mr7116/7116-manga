@@ -17,6 +17,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "7116-MANGA | อ่านมังงะ มังฮวา แปลไทย ออนไลน์ฟรี",
   description: "เว็บอ่านมังงะ มันฮวา แปลไทย คมชัด โหลดเร็ว อัปเดตรวดเร็วทุกวัน รองรับทั้งคอมพิวเตอร์และมือถือ",
+  // Image hosts such as imgez.org (used by speed-manga) block hotlinks that carry a foreign
+  // Referer but allow requests without one, so never send a Referer from this site.
+  referrer: "no-referrer",
 };
 
 export default function RootLayout({
